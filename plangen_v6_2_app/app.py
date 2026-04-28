@@ -1,6 +1,7 @@
-import json
+import re
 from pathlib import Path
 import streamlit as st
+from docx import Document
 
 from planner.core.markdown_mapper import parse_markdown_to_template_data
 from planner.core.renderer import generate_docx_from_template, enrich_template_context
@@ -9,54 +10,53 @@ APP_DIR = Path(__file__).parent
 OUTPUT_DIR = APP_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-DEFAULT_TEMPLATE = APP_DIR / "templates" / "AI_Center_QC_Plan_Template_20260310.docx"
-FALLBACK_TEMPLATE = APP_DIR / "templates" / "PlanGen_v62_Template.docx"
+TEMPLATE_PATH = APP_DIR / "templates" / "AI_Center_QC_Plan_Template_20260310.docx"
 
-st.set_page_config(page_title="Markdown映射版", layout="wide")
-st.title("PlanGen｜Markdown自动映射系统")
-st.markdown("👉 粘贴钉钉生成的Markdown，系统自动写入模板（不做分析）")
+st.set_page_config(page_title="PlanGen 稽查计划生成", layout="wide")
+st.title("PlanGen｜稽查计划一键生成")
+st.caption("复制粘贴钉钉 Markdown，或上传钉钉AI质控结果 Word 文档，系统自动映射到内置模板并下载生成文件。")
 
-uploaded_template = st.file_uploader("上传Word模板（必须为.docx；如仓库内已放模板可不上传）", type=["docx"])
+if not TEMPLATE_PATH.exists():
+    st.error("系统内置模板缺失：请将 AI_Center_QC_Plan_Template_20260310.docx 放入 plangen_v6_2_app/templates/ 目录。")
+    st.stop()
 
-if uploaded_template:
-    template_path = OUTPUT_DIR / uploaded_template.name
-    template_path.write_bytes(uploaded_template.getvalue())
-    st.success(f"已使用上传模板：{uploaded_template.name}")
-elif DEFAULT_TEMPLATE.exists():
-    template_path = DEFAULT_TEMPLATE
-    st.info(f"已使用仓库模板：{DEFAULT_TEMPLATE.name}")
-elif FALLBACK_TEMPLATE.exists():
-    template_path = FALLBACK_TEMPLATE
-    st.warning(f"未找到正式模板，已使用备用模板：{FALLBACK_TEMPLATE.name}")
+input_mode = st.radio("选择输入方式", ["粘贴 Markdown", "上传钉钉AI质控结果 Word"], horizontal=True)
+
+source_text = ""
+if input_mode == "粘贴 Markdown":
+    source_text = st.text_area("粘贴钉钉生成的 Markdown 全文", height=430)
 else:
-    template_path = None
-    st.error("未找到Word模板。请在页面上传.docx模板，或将模板放到 plangen_v6_2_app/templates/ 目录。")
+    uploaded_docx = st.file_uploader("上传钉钉AI质控结果 Word 文档（.docx）", type=["docx"])
+    if uploaded_docx:
+        temp_docx = OUTPUT_DIR / uploaded_docx.name
+        temp_docx.write_bytes(uploaded_docx.getvalue())
+        doc = Document(str(temp_docx))
+        parts = []
+        for p in doc.paragraphs:
+            if p.text.strip():
+                parts.append(p.text.strip())
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+                if any(cells):
+                    parts.append("| " + " | ".join(cells) + " |")
+        source_text = "\n".join(parts)
 
-md_text = st.text_area("粘贴Markdown全文", height=500)
+if source_text.strip():
+    with st.expander("查看输入内容", expanded=False):
+        st.text_area("输入内容预览", source_text[:60000], height=260)
 
-if md_text:
-    if st.button("解析并映射"):
-        data = parse_markdown_to_template_data(md_text)
-        data = enrich_template_context(data)
-        st.session_state["data"] = data
-
-if "data" in st.session_state:
-    data = st.session_state["data"]
-
-    st.subheader("结构化结果（可修改）")
-    edited = st.text_area(
-        "JSON编辑",
-        value=json.dumps(data, ensure_ascii=False, indent=2),
-        height=500
-    )
-
-    if st.button("生成Word"):
-        if template_path is None or not Path(template_path).exists():
-            st.error("无法生成Word：未找到模板。请先上传.docx模板。")
-        else:
-            data = json.loads(edited)
+    if st.button("生成稽查计划", type="primary"):
+        try:
+            data = parse_markdown_to_template_data(source_text)
             data = enrich_template_context(data)
-            output = OUTPUT_DIR / "质控计划.docx"
-            generate_docx_from_template(template_path, data, output)
-            st.success("生成成功")
-            st.download_button("下载Word", data=output.read_bytes(), file_name=output.name)
+            project_name = data.get("project", {}).get("name", "稽查计划") or "稽查计划"
+            safe_name = re.sub(r"[\\/:*?\"<>|\r\n]+", "_", project_name).strip()[:60]
+            output_path = OUTPUT_DIR / f"{safe_name} 稽查计划.docx"
+            generate_docx_from_template(TEMPLATE_PATH, data, output_path)
+            st.success("稽查计划生成成功")
+            st.download_button("下载稽查计划 Word", data=output_path.read_bytes(), file_name=output_path.name, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        except Exception as e:
+            st.error(f"生成失败：{e}")
+else:
+    st.info("请粘贴 Markdown 内容，或上传钉钉AI质控结果 Word 文档。")
