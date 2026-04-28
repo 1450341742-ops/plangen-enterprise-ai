@@ -2,3 +2,6 @@ streamlit
 python-docx
 PyPDF2
 requests
+pymupdf
+pillow
+pytesseract
