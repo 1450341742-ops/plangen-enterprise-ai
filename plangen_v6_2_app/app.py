@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from datetime import date
 import streamlit as st
@@ -11,50 +12,67 @@ APP_DIR = Path(__file__).parent
 OUTPUT_DIR = APP_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-DEFAULT_TEMPLATE = APP_DIR / "templates" / "PlanGen_v62_Template.docx"
+# 优先使用用户自己的正式模板；如果不存在，再回退到系统简版模板。
+USER_TEMPLATE = APP_DIR / "templates" / "AI_Center_QC_Plan_Template_20260310.docx"
+DEFAULT_TEMPLATE = USER_TEMPLATE if USER_TEMPLATE.exists() else APP_DIR / "templates" / "PlanGen_v62_Template.docx"
 
-st.set_page_config(page_title="PlanGen v6.3 企业级版", layout="wide")
-st.title("PlanGen v6.3 企业级 AI 版")
-st.caption("本地免费 AI：Ollama + Qwen2.5:3b。已修复长时间卡住、AI失败中断、字段映射残留、动态表格写入不稳定等问题。")
+# Streamlit Cloud 免费版：默认不调用本地 Ollama，避免 127.0.0.1 云端不可达导致卡死。
+IS_CLOUD = bool(os.getenv("STREAMLIT_SERVER_PORT") or os.getenv("STREAMLIT_SHARING_MODE") or os.getenv("HOSTNAME"))
+
+st.set_page_config(page_title="PlanGen 云端免费版", layout="wide")
+st.title("PlanGen 云端免费版｜中心质控计划自动生成")
+st.caption("云端免费版默认使用规则引擎，不依赖本地 Ollama，不需要 API Key。生成内容会自动映射到你的中心质控计划模板中。")
 
 with st.sidebar:
-    st.subheader("模式")
-    mode = st.radio("选择模式", ["规则+AI增强（推荐）", "仅规则兜底"], index=0)
+    st.subheader("运行模式")
+    if IS_CLOUD:
+        st.success("当前为云端免费版：已自动关闭本地AI调用，避免页面卡死。")
+        mode = "仅规则兜底"
+    else:
+        mode = st.radio("选择模式", ["规则+AI增强（本地Ollama）", "仅规则兜底"], index=1)
+
     st.markdown(
-        "**V6.3能力：**\n"
-        "- 基础字段锁死提取\n"
-        "- 章节切块后再AI识别\n"
-        "- 入排标准 + 重点关注一次性返回\n"
-        "- AI失败自动回退，不阻断文档生成\n"
-        "- 生成前字段确认页\n"
-        "- Word动态表格稳定写入\n"
-        "- PDF导出接口"
-    )
-    st.markdown(
-        "**本地AI排查命令：**\n"
-        "```powershell\n"
-        "ollama pull qwen2.5:3b\n"
-        "ollama serve\n"
-        "ollama run qwen2.5:3b\n"
-        "```"
+        "**云端免费版能力：**\n"
+        "- 不需要 API Key\n"
+        "- 不依赖本地 Ollama\n"
+        "- 协议文本提取\n"
+        "- 规则引擎识别入排标准\n"
+        "- 行业级重点关注生成\n"
+        "- JSON 预览与编辑\n"
+        "- 自动写入你的 Word 模板\n"
+        "- DOCX 导出"
     )
 
-ollama_ok, ollama_msg = check_ollama_status()
-if mode == "规则+AI增强（推荐）":
+    if not IS_CLOUD:
+        st.markdown(
+            "**本地AI可选排查命令：**\n"
+            "```powershell\n"
+            "ollama pull qwen2.5:3b\n"
+            "ollama serve\n"
+            "ollama run qwen2.5:3b\n"
+            "```"
+        )
+
+ollama_ok, ollama_msg = (False, "云端免费版已关闭本地Ollama检测")
+if not IS_CLOUD and mode == "规则+AI增强（本地Ollama）":
+    ollama_ok, ollama_msg = check_ollama_status()
     if ollama_ok:
         st.success(ollama_msg)
     else:
-        st.warning(f"{ollama_msg}。当前仍可切换到“仅规则兜底”生成可编辑JSON和Word。")
+        st.warning(f"{ollama_msg}。系统会自动降级为规则引擎。")
 
 uploaded_protocol = st.file_uploader("上传方案（PDF / DOCX / TXT）", type=["pdf", "docx", "txt"])
-uploaded_template = st.file_uploader("上传Word模板（可选）", type=["docx"])
+uploaded_template = st.file_uploader("上传Word模板（可选；不上传则使用系统内置的你的中心质控计划模板）", type=["docx"])
 
 template_path = DEFAULT_TEMPLATE
 if uploaded_template:
     template_path = OUTPUT_DIR / uploaded_template.name
     template_path.write_bytes(uploaded_template.getvalue())
 
-st.info(f"当前模板：{template_path.name}")
+if USER_TEMPLATE.exists() and template_path == USER_TEMPLATE:
+    st.info("当前模板：已使用你的中心质控计划正式模板 AI_Center_QC_Plan_Template_20260310.docx")
+else:
+    st.info(f"当前模板：{template_path.name}")
 
 if uploaded_protocol:
     raw_text = extract_text_from_file(uploaded_protocol)
@@ -64,17 +82,18 @@ if uploaded_protocol:
     if raw_text.startswith("文件解析失败") or raw_text.startswith("PDF解析失败"):
         st.error(raw_text)
     else:
-        if st.button("AI生成结构化JSON"):
-            use_ai = mode == "规则+AI增强（推荐）" and ollama_ok
-            if mode == "规则+AI增强（推荐）" and not ollama_ok:
-                st.warning("本地AI不可用，系统已自动切换为规则兜底模式生成。")
+        if st.button("生成结构化JSON"):
+            use_ai = (not IS_CLOUD) and mode == "规则+AI增强（本地Ollama）" and ollama_ok
+            if IS_CLOUD:
+                st.info("云端免费版正在使用规则引擎生成，不调用本地AI。")
+            elif mode == "规则+AI增强（本地Ollama）" and not ollama_ok:
+                st.warning("本地AI不可用，系统已自动切换为规则引擎生成。")
             with st.spinner("系统正在解析协议并生成结构化JSON，请稍候..."):
                 data = build_v62_plan_json(raw_text, use_ai=use_ai)
             if isinstance(data, dict) and data.get("_error"):
                 st.error(data["_error"])
                 if data.get("_detail"):
                     st.code(str(data["_detail"]))
-                st.info("建议切换到“仅规则兜底”，或确认 Ollama/qwen2.5:3b 是否可用。")
             else:
                 st.session_state["plan_json"] = data
                 st.success("JSON生成成功")
@@ -91,11 +110,11 @@ if "plan_json" in st.session_state:
     with c2:
         version_no = st.text_input("版本号", value=data.get("project", {}).get("version_no", "V1.0"))
         version_date = st.text_input("版本日期", value=data.get("project", {}).get("version_date", date.today().strftime("%Y年%m月%d日")))
-        audit_type = st.text_input("稽查类型", value=data.get("project", {}).get("audit_type", "中心常规稽查"))
+        audit_type = st.text_input("质控类型", value=data.get("project", {}).get("audit_type", "中心常规质控"))
     with c3:
         author = st.text_input("撰写人", value=data.get("AUTHOR", "苗田"))
         approver = st.text_input("审批人", value=data.get("APPROVER", "张艳"))
-        audit_company = st.text_input("稽查公司", value=data.get("AUDIT_COMPANY", "北京万宁睿和医药科技有限公司"))
+        audit_company = st.text_input("质控公司", value=data.get("AUDIT_COMPANY", "北京万宁睿和医药科技有限公司"))
 
     data.setdefault("project", {})
     data["project"]["name"] = project_name
@@ -114,7 +133,7 @@ if "plan_json" in st.session_state:
         height=560,
     )
 
-    tabs = st.tabs(["项目概览", "入排标准", "流程要求", "AI稽查重点", "RBQM", "访谈问题", "发现/CAPA草案", "完整JSON"])
+    tabs = st.tabs(["项目概览", "入排标准", "流程要求", "重点关注", "RBQM", "访谈问题", "发现/CAPA草案", "完整JSON"])
     parsed = data
 
     with tabs[0]:
@@ -142,7 +161,7 @@ if "plan_json" in st.session_state:
         try:
             edited_data = json.loads(edited_text)
             edited_data = enrich_template_context(edited_data)
-            docx_path = OUTPUT_DIR / "PlanGen_v63_Output.docx"
+            docx_path = OUTPUT_DIR / "PlanGen_Cloud_Free_Output.docx"
             generate_docx_from_template(template_path=template_path, data=edited_data, output_path=docx_path)
             st.success("DOCX 生成成功")
             st.download_button("下载 DOCX", data=docx_path.read_bytes(), file_name=docx_path.name)
@@ -150,6 +169,6 @@ if "plan_json" in st.session_state:
             if pdf_path and Path(pdf_path).exists():
                 st.download_button("下载 PDF", data=Path(pdf_path).read_bytes(), file_name=Path(pdf_path).name)
             else:
-                st.info("未生成 PDF。若需要 PDF，请先在本机安装 LibreOffice。")
+                st.info("云端免费版通常不生成PDF；如需PDF，可下载DOCX后本地另存为PDF。")
         except Exception as e:
             st.error(f"正式生成文档失败：{e}")
