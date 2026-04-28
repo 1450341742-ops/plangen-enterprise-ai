@@ -13,30 +13,29 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 DEFAULT_TEMPLATE = APP_DIR / "templates" / "PlanGen_v62_Template.docx"
 
-st.set_page_config(page_title="PlanGen v6.2 企业级版", layout="wide")
-st.title("PlanGen v6.2 企业级 AI 版")
-st.caption("本地免费 AI：Ollama + Qwen。支持协议结构化抽取、入排标准重点关注、RBQM、访谈问题、发现/CAPA草案、字段确认、Word/PDF导出。")
+st.set_page_config(page_title="PlanGen v6.3 企业级版", layout="wide")
+st.title("PlanGen v6.3 企业级 AI 版")
+st.caption("本地免费 AI：Ollama + Qwen2.5:3b。已修复长时间卡住、AI失败中断、字段映射残留、动态表格写入不稳定等问题。")
 
 with st.sidebar:
     st.subheader("模式")
     mode = st.radio("选择模式", ["规则+AI增强（推荐）", "仅规则兜底"], index=0)
     st.markdown(
-        "**V6.2能力：**\n"
+        "**V6.3能力：**\n"
         "- 基础字段锁死提取\n"
-        "- AI分块抽取：入选 / 排除 / 随机 / 复筛 / 终止 / 退出 / 禁用药 / 剂量调整\n"
-        "- AI批量生成条目级重点关注\n"
-        "- AI生成 RBQM 策略\n"
-        "- AI生成访谈问题\n"
-        "- AI生成稽查发现 / CAPA 草案\n"
+        "- 章节切块后再AI识别\n"
+        "- 入排标准 + 重点关注一次性返回\n"
+        "- AI失败自动回退，不阻断文档生成\n"
         "- 生成前字段确认页\n"
-        "- Word / PDF导出"
+        "- Word动态表格稳定写入\n"
+        "- PDF导出接口"
     )
     st.markdown(
-        "**排查命令：**\n"
+        "**本地AI排查命令：**\n"
         "```powershell\n"
-        "ollama list\n"
+        "ollama pull qwen2.5:3b\n"
         "ollama serve\n"
-        "ollama run qwen2.5:7b\n"
+        "ollama run qwen2.5:3b\n"
         "```"
     )
 
@@ -45,7 +44,7 @@ if mode == "规则+AI增强（推荐）":
     if ollama_ok:
         st.success(ollama_msg)
     else:
-        st.warning(f"{ollama_msg}。若暂时不可用，可切换到“仅规则兜底”。")
+        st.warning(f"{ollama_msg}。当前仍可切换到“仅规则兜底”生成可编辑JSON和Word。")
 
 uploaded_protocol = st.file_uploader("上传方案（PDF / DOCX / TXT）", type=["pdf", "docx", "txt"])
 uploaded_template = st.file_uploader("上传Word模板（可选）", type=["docx"])
@@ -66,19 +65,19 @@ if uploaded_protocol:
         st.error(raw_text)
     else:
         if st.button("AI生成结构化JSON"):
-            use_ai = mode == "规则+AI增强（推荐）"
-            if use_ai and not ollama_ok:
-                st.error(ollama_msg)
+            use_ai = mode == "规则+AI增强（推荐）" and ollama_ok
+            if mode == "规则+AI增强（推荐）" and not ollama_ok:
+                st.warning("本地AI不可用，系统已自动切换为规则兜底模式生成。")
+            with st.spinner("系统正在解析协议并生成结构化JSON，请稍候..."):
+                data = build_v62_plan_json(raw_text, use_ai=use_ai)
+            if isinstance(data, dict) and data.get("_error"):
+                st.error(data["_error"])
+                if data.get("_detail"):
+                    st.code(str(data["_detail"]))
+                st.info("建议切换到“仅规则兜底”，或确认 Ollama/qwen2.5:3b 是否可用。")
             else:
-                with st.spinner("AI正在解析，请稍候..."):
-                    data = build_v62_plan_json(raw_text, use_ai=use_ai)
-                if isinstance(data, dict) and data.get("_error"):
-                    st.error(data["_error"])
-                    if data.get("_detail"):
-                        st.code(str(data["_detail"]))
-                else:
-                    st.session_state["plan_json"] = data
-                    st.success("JSON生成成功")
+                st.session_state["plan_json"] = data
+                st.success("JSON生成成功")
 
 if "plan_json" in st.session_state:
     data = st.session_state["plan_json"]
@@ -122,7 +121,9 @@ if "plan_json" in st.session_state:
         st.write(parsed.get("project", {}))
         st.write(parsed.get("protocol_analysis", {}))
     with tabs[1]:
+        st.write("入选标准")
         st.dataframe(parsed.get("criteria_ai_rows", []), use_container_width=True)
+        st.write("排除标准")
         st.dataframe(parsed.get("exclusion_ai_rows", []), use_container_width=True)
     with tabs[2]:
         st.dataframe(parsed.get("process_requirement_rows", []), use_container_width=True)
@@ -141,7 +142,7 @@ if "plan_json" in st.session_state:
         try:
             edited_data = json.loads(edited_text)
             edited_data = enrich_template_context(edited_data)
-            docx_path = OUTPUT_DIR / "PlanGen_v62_Output.docx"
+            docx_path = OUTPUT_DIR / "PlanGen_v63_Output.docx"
             generate_docx_from_template(template_path=template_path, data=edited_data, output_path=docx_path)
             st.success("DOCX 生成成功")
             st.download_button("下载 DOCX", data=docx_path.read_bytes(), file_name=docx_path.name)
