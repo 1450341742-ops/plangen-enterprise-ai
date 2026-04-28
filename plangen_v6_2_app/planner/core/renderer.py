@@ -7,6 +7,8 @@ import subprocess
 from typing import Any, Dict, Iterable, List, Optional
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Pt
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
@@ -32,11 +34,32 @@ def enrich_template_context(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _safe_text(value: Any) -> str:
-    return "" if value is None else str(value).replace("[填写]", "待填写").strip()
+    if value is None:
+        return ""
+    text = str(value).replace("[填写]", "待填写").strip()
+    text = text.replace("↵", "").replace("\r", "\n")
+    return text
+
+
+def _clean_black_squares(text: str) -> str:
+    text = _safe_text(text)
+    lines = []
+    for line in text.split("\n"):
+        t = line.strip()
+        if not t or t in {"■", "▪", "·", "•", "-"}:
+            continue
+        t = re_sub_square_prefix(t)
+        lines.append(t)
+    return "\n".join(lines)
+
+
+def re_sub_square_prefix(text: str) -> str:
+    import re
+    return re.sub(r"^[■▪]\s*", "", text).strip()
 
 
 def _set_cell_text_preserve_style(cell, text: Any) -> None:
-    text = _safe_text(text)
+    text = _clean_black_squares(text)
     if cell.paragraphs:
         p = cell.paragraphs[0]
         if p.runs:
@@ -113,7 +136,7 @@ def _all_paragraphs(doc: Document):
 
 
 def _set_paragraph_text_preserve_style(paragraph: Paragraph, text: Any) -> None:
-    text = _safe_text(text)
+    text = _clean_black_squares(text)
     if paragraph.runs:
         paragraph.runs[0].text = text
         for r in paragraph.runs[1:]:
@@ -140,7 +163,14 @@ def _replace_cover_title(doc: Document, title: str) -> None:
                 target.add_run("")
             for run in target.runs:
                 run.text = ""
-            target.runs[0].text = title
+            run = target.runs[0]
+            run.text = title
+            run.font.size = Pt(18)  # 小二
+            run.font.bold = False
+            target.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            # 清理标题前一段可能残留的“一项 xxxxx研究（XXXX）”占位
+            if i > 1 and ("xxxxx" in doc.paragraphs[i - 2].text or "XXXXXXXX" in doc.paragraphs[i - 2].text):
+                _set_paragraph_text_preserve_style(doc.paragraphs[i - 2], "")
             return
 
 
