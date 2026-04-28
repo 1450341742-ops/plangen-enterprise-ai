@@ -12,48 +12,46 @@ APP_DIR = Path(__file__).parent
 OUTPUT_DIR = APP_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# 优先使用用户自己的正式模板；如果不存在，再回退到系统简版模板。
 USER_TEMPLATE = APP_DIR / "templates" / "AI_Center_QC_Plan_Template_20260310.docx"
 DEFAULT_TEMPLATE = USER_TEMPLATE if USER_TEMPLATE.exists() else APP_DIR / "templates" / "PlanGen_v62_Template.docx"
 
-# Streamlit Cloud 免费版：默认不调用本地 Ollama，避免 127.0.0.1 云端不可达导致卡死。
 IS_CLOUD = bool(os.getenv("STREAMLIT_SERVER_PORT") or os.getenv("STREAMLIT_SHARING_MODE") or os.getenv("HOSTNAME"))
 
-st.set_page_config(page_title="PlanGen 云端免费版", layout="wide")
-st.title("PlanGen 云端免费版｜中心质控计划自动生成")
-st.caption("云端免费版默认使用规则引擎，不依赖本地 Ollama，不需要 API Key。生成内容会自动映射到你的中心质控计划模板中。")
+st.set_page_config(page_title="PlanGen 团队内部版", layout="wide")
+st.title("PlanGen 团队内部版｜OCR + AI/规则双引擎")
+st.caption("支持扫描PDF OCR、可复制PDF、Word和TXT。团队本地部署可使用OCR和Ollama；云端会自动降级为规则引擎。")
 
 with st.sidebar:
     st.subheader("运行模式")
     if IS_CLOUD:
-        st.success("当前为云端免费版：已自动关闭本地AI调用，避免页面卡死。")
+        st.warning("当前为云端环境：本地Ollama不可用；OCR取决于云端是否安装Tesseract。建议团队内部用本地部署版。")
         mode = "仅规则兜底"
     else:
         mode = st.radio("选择模式", ["规则+AI增强（本地Ollama）", "仅规则兜底"], index=1)
 
     st.markdown(
-        "**云端免费版能力：**\n"
-        "- 不需要 API Key\n"
-        "- 不依赖本地 Ollama\n"
-        "- 协议文本提取\n"
-        "- 规则引擎识别入排标准\n"
+        "**团队内部版能力：**\n"
+        "- 扫描PDF OCR\n"
+        "- 可复制PDF/Word/TXT解析\n"
+        "- 严格项目字段提取\n"
+        "- 入排标准章节切块\n"
         "- 行业级重点关注生成\n"
-        "- JSON 预览与编辑\n"
-        "- 自动写入你的 Word 模板\n"
-        "- DOCX 导出"
+        "- JSON预览与编辑\n"
+        "- 自动写入你的Word模板\n"
+        "- DOCX导出"
     )
 
     if not IS_CLOUD:
         st.markdown(
-            "**本地AI可选排查命令：**\n"
+            "**本地OCR/AI准备：**\n"
             "```powershell\n"
+            "tesseract --version\n"
             "ollama pull qwen2.5:3b\n"
             "ollama serve\n"
-            "ollama run qwen2.5:3b\n"
             "```"
         )
 
-ollama_ok, ollama_msg = (False, "云端免费版已关闭本地Ollama检测")
+ollama_ok, ollama_msg = (False, "当前未启用本地AI")
 if not IS_CLOUD and mode == "规则+AI增强（本地Ollama）":
     ollama_ok, ollama_msg = check_ollama_status()
     if ollama_ok:
@@ -61,7 +59,8 @@ if not IS_CLOUD and mode == "规则+AI增强（本地Ollama）":
     else:
         st.warning(f"{ollama_msg}。系统会自动降级为规则引擎。")
 
-uploaded_protocol = st.file_uploader("上传方案（PDF / DOCX / TXT）", type=["pdf", "docx", "txt"])
+uploaded_protocol = st.file_uploader("上传方案（扫描PDF / PDF / DOCX / TXT）", type=["pdf", "docx", "txt"])
+manual_text = st.text_area("可选：粘贴OCR后的方案文本（如PDF识别效果差，可直接粘贴WPS/Adobe OCR文本）", height=180)
 uploaded_template = st.file_uploader("上传Word模板（可选；不上传则使用系统内置的你的中心质控计划模板）", type=["docx"])
 
 template_path = DEFAULT_TEMPLATE
@@ -74,19 +73,25 @@ if USER_TEMPLATE.exists() and template_path == USER_TEMPLATE:
 else:
     st.info(f"当前模板：{template_path.name}")
 
+raw_text = ""
 if uploaded_protocol:
     raw_text = extract_text_from_file(uploaded_protocol)
+
+if manual_text and len(manual_text.strip()) > 50:
+    raw_text = manual_text
+
+if uploaded_protocol or manual_text:
     st.subheader("协议文本预览")
-    st.text_area("提取结果", raw_text[:20000], height=260)
+    st.text_area("提取/粘贴结果", raw_text[:30000], height=300)
 
     if raw_text.startswith("文件解析失败") or raw_text.startswith("PDF解析失败"):
         st.error(raw_text)
+    elif len(raw_text.strip()) < 300:
+        st.error("提取到的文本过少，无法生成有效质控计划。请确认：1）本地已安装Tesseract；2）扫描PDF清晰；3）或将WPS/Adobe OCR后的文本粘贴到上方文本框。")
     else:
         if st.button("生成结构化JSON"):
             use_ai = (not IS_CLOUD) and mode == "规则+AI增强（本地Ollama）" and ollama_ok
-            if IS_CLOUD:
-                st.info("云端免费版正在使用规则引擎生成，不调用本地AI。")
-            elif mode == "规则+AI增强（本地Ollama）" and not ollama_ok:
+            if mode == "规则+AI增强（本地Ollama）" and not ollama_ok:
                 st.warning("本地AI不可用，系统已自动切换为规则引擎生成。")
             with st.spinner("系统正在解析协议并生成结构化JSON，请稍候..."):
                 data = build_v62_plan_json(raw_text, use_ai=use_ai)
@@ -127,11 +132,7 @@ if "plan_json" in st.session_state:
     data["APPROVER"] = approver
     data["AUDIT_COMPANY"] = audit_company
 
-    edited_text = st.text_area(
-        "JSON预览与编辑",
-        value=json.dumps(data, ensure_ascii=False, indent=2),
-        height=560,
-    )
+    edited_text = st.text_area("JSON预览与编辑", value=json.dumps(data, ensure_ascii=False, indent=2), height=560)
 
     tabs = st.tabs(["项目概览", "入排标准", "流程要求", "重点关注", "RBQM", "访谈问题", "发现/CAPA草案", "完整JSON"])
     parsed = data
@@ -161,7 +162,7 @@ if "plan_json" in st.session_state:
         try:
             edited_data = json.loads(edited_text)
             edited_data = enrich_template_context(edited_data)
-            docx_path = OUTPUT_DIR / "PlanGen_Cloud_Free_Output.docx"
+            docx_path = OUTPUT_DIR / "PlanGen_Internal_OCR_Output.docx"
             generate_docx_from_template(template_path=template_path, data=edited_data, output_path=docx_path)
             st.success("DOCX 生成成功")
             st.download_button("下载 DOCX", data=docx_path.read_bytes(), file_name=docx_path.name)
@@ -169,6 +170,6 @@ if "plan_json" in st.session_state:
             if pdf_path and Path(pdf_path).exists():
                 st.download_button("下载 PDF", data=Path(pdf_path).read_bytes(), file_name=Path(pdf_path).name)
             else:
-                st.info("云端免费版通常不生成PDF；如需PDF，可下载DOCX后本地另存为PDF。")
+                st.info("如需PDF，可下载DOCX后本地另存为PDF。")
         except Exception as e:
             st.error(f"正式生成文档失败：{e}")
