@@ -4,6 +4,8 @@ import re
 from typing import Any, Dict, List, Tuple
 
 PROCESS_KEYS = ["随机化要求", "随机要求", "复筛要求", "终止治疗要求", "退出研究要求", "禁止合并治疗要求", "限制用药要求", "药物剂量调整规则", "剂量调整", "关键时间窗要求"]
+DIRTY_KEYWORDS = ["质控范围", "质控分工", "序号 |", "研究者文件夹", "受试者文件夹", "安全性信息的收集", "临床试验质量管理体系", "供应商管理", "受试者知情同意过程及文件", "受试者筛选、入组", "临床试验数据记录、报告及溯源"]
+PLACEHOLDERS = {"待填写", "xxxxx", "xxxxxx", "xxx", "[填写]"}
 
 
 def _clean(text: str) -> str:
@@ -23,6 +25,17 @@ def _strip_md(text: str) -> str:
     text = re.sub(r"^#{1,6}\s*", "", text)
     text = re.sub(r"^[\-\*+·]\s*", "", text)
     return text.strip(" |\t")
+
+
+def _is_dirty_line(text: str) -> bool:
+    t = _strip_md(text)
+    if not t or t in PLACEHOLDERS:
+        return True
+    if re.fullmatch(r"[-| ]+", t):
+        return True
+    if any(k in t for k in DIRTY_KEYWORDS):
+        return True
+    return False
 
 
 def _extract_first(patterns: List[str], text: str, default: str = "") -> str:
@@ -69,12 +82,16 @@ def _table_rows_by_headers(md: str, header_keywords: List[str]) -> List[List[str
     return out
 
 
+def _heading_match(line: str, keys: List[str]) -> bool:
+    plain = _strip_md(line)
+    return any(k in plain for k in keys)
+
+
 def _section(md: str, start_keys: List[str], stop_keys: List[str] | None = None) -> str:
     lines = md.splitlines()
     start = None
     for i, line in enumerate(lines):
-        plain = _strip_md(line)
-        if any(k in plain for k in start_keys):
+        if _heading_match(line, start_keys):
             start = i + 1
             break
     if start is None:
@@ -83,9 +100,12 @@ def _section(md: str, start_keys: List[str], stop_keys: List[str] | None = None)
     for j in range(start, len(lines)):
         raw = lines[j].strip()
         plain = _strip_md(raw)
-        if stop_keys and any(k in plain for k in stop_keys) and (raw.startswith("#") or re.match(r"^\d+(\.\d+)+", plain)):
-            end = j
-            break
+        if not plain:
+            continue
+        if stop_keys and any(k in plain for k in stop_keys):
+            if raw.startswith("#") or re.match(r"^(\d+\.)?\d+(\.\d+)+", plain) or plain.startswith("三、") or plain.startswith("一、"):
+                end = j
+                break
     return "\n".join(lines[start:end]).strip()
 
 
@@ -94,9 +114,7 @@ def _section_lines(md: str, start_keys: List[str], stop_keys: List[str]) -> List
     lines = []
     for line in sec.splitlines():
         plain = _strip_md(line)
-        if not plain or plain.startswith("|") or re.fullmatch(r"[-| ]+", plain):
-            continue
-        if plain in ["待填写", "xxxxxx", "xxxxx"]:
+        if plain.startswith("|") or _is_dirty_line(plain):
             continue
         lines.append(plain)
     return lines
@@ -208,14 +226,14 @@ def _extract_safety_rows(md: str) -> List[Dict[str, str]]:
 
 
 def _extract_imp_spec_and_points(md: str) -> Tuple[str, str]:
-    section = _section(md, ["2.5.4", "临床试验用药品管理"], ["2.5.5", "生物样本管理", "2.5.6"])
+    section = _section(md, ["2.5.4", "临床试验用药品管理"], ["2.5.5", "生物样本管理", "2.5.6", "三、"])
     rows = _table_rows_by_headers(section, ["试验药物规格"])
     spec = rows[0][0] if rows else ""
     lines = []
-    for plain in _section_lines(md, ["2.5.4", "临床试验用药品管理"], ["2.5.5", "生物样本管理", "2.5.6"]):
-        if "试验药物规格" in plain or plain == spec:
-            continue
-        if "质控范围" in plain or "质控分工" in plain or "序号 |" in plain:
+    for plain in _section_lines(md, ["2.5.4", "临床试验用药品管理"], ["2.5.5", "生物样本管理", "2.5.6", "三、"]):
+        if "试验药物规格" in plain or plain == spec or "规格：" in plain:
+            if not spec and "规格：" in plain:
+                spec = plain
             continue
         lines.append(plain)
     return spec, "\n".join(lines[:10])
