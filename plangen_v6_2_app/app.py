@@ -12,21 +12,21 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 TEMPLATE_PATH = APP_DIR / "templates" / "AI_Center_QC_Plan_Template_20260310.docx"
 
-st.set_page_config(page_title="PlanGen 稽查计划生成", layout="wide")
+st.set_page_config(page_title="PlanGen 稽查计划生成", layout="centered")
 st.title("PlanGen｜稽查计划一键生成")
-st.caption("复制粘贴钉钉 Markdown，或上传钉钉AI质控结果 Word 文档，系统自动映射到内置模板并下载生成文件。")
+st.caption("复制钉钉 Markdown，或上传钉钉AI质控结果 Word，系统自动映射到内置模板。")
 
 if not TEMPLATE_PATH.exists():
     st.error("系统内置模板缺失：请将 AI_Center_QC_Plan_Template_20260310.docx 放入 plangen_v6_2_app/templates/ 目录。")
     st.stop()
 
-input_mode = st.radio("选择输入方式", ["粘贴 Markdown", "上传钉钉AI质控结果 Word"], horizontal=True)
+input_mode = st.radio("选择输入方式", ["粘贴 Markdown", "上传 Word"], horizontal=True, key="input_mode")
 
 source_text = ""
 if input_mode == "粘贴 Markdown":
-    source_text = st.text_area("粘贴钉钉生成的 Markdown 全文", height=430)
+    source_text = st.text_area("粘贴钉钉生成的 Markdown 全文", height=420, key="md_input")
 else:
-    uploaded_docx = st.file_uploader("上传钉钉AI质控结果 Word 文档（.docx）", type=["docx"])
+    uploaded_docx = st.file_uploader("上传钉钉AI质控结果 Word 文档（.docx）", type=["docx"], key="docx_input")
     if uploaded_docx:
         temp_docx = OUTPUT_DIR / uploaded_docx.name
         temp_docx.write_bytes(uploaded_docx.getvalue())
@@ -41,12 +41,11 @@ else:
                 if any(cells):
                     parts.append("| " + " | ".join(cells) + " |")
         source_text = "\n".join(parts)
+        st.success("Word内容读取完成，可以生成稽查计划。")
 
 if source_text.strip():
-    with st.expander("查看输入内容", expanded=False):
-        st.text_area("输入内容预览", source_text[:60000], height=260)
-
-    if st.button("生成稽查计划", type="primary"):
+    st.caption(f"已读取内容长度：{len(source_text)} 字符")
+    if st.button("生成并下载稽查计划", type="primary", key="generate_btn"):
         try:
             data = parse_markdown_to_template_data(source_text)
             data = enrich_template_context(data)
@@ -54,8 +53,14 @@ if source_text.strip():
             safe_name = re.sub(r"[\\/:*?\"<>|\r\n]+", "_", project_name).strip()[:60]
             output_path = OUTPUT_DIR / f"{safe_name} 稽查计划.docx"
             generate_docx_from_template(TEMPLATE_PATH, data, output_path)
-            st.success("稽查计划生成成功")
-            st.download_button("下载稽查计划 Word", data=output_path.read_bytes(), file_name=output_path.name, mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            st.success("稽查计划生成成功，请点击下方按钮下载。")
+            st.download_button(
+                "下载稽查计划 Word",
+                data=output_path.read_bytes(),
+                file_name=output_path.name,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key="download_btn"
+            )
         except Exception as e:
             st.error(f"生成失败：{e}")
 else:
