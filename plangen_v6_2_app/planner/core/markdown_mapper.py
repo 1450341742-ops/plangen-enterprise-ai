@@ -89,6 +89,19 @@ def _section(md: str, start_keys: List[str], stop_keys: List[str] | None = None)
     return "\n".join(lines[start:end]).strip()
 
 
+def _section_lines(md: str, start_keys: List[str], stop_keys: List[str]) -> List[str]:
+    sec = _section(md, start_keys, stop_keys)
+    lines = []
+    for line in sec.splitlines():
+        plain = _strip_md(line)
+        if not plain or plain.startswith("|") or re.fullmatch(r"[-| ]+", plain):
+            continue
+        if plain in ["待填写", "xxxxxx", "xxxxx"]:
+            continue
+        lines.append(plain)
+    return lines
+
+
 def _find_label_value(md: str, labels: List[str]) -> str:
     for table in _parse_md_tables(md):
         for row in table:
@@ -104,13 +117,14 @@ def _find_label_value(md: str, labels: List[str]) -> str:
 
 
 def _extract_title(md: str) -> str:
-    lines = [l.strip() for l in md.splitlines() if l.strip()]
-    for line in lines[:30]:
+    project = _extract_first([r"###\s*1\.1\s*项目名称[:：]?\s*\n([^#]+?)\n\s*###", r"1\.1\s*项目名称[:：]?\s*\n([^#]+?)\n\s*1\.2", r"项目名称[:：]\s*([^\n]+)"], md)
+    if project:
+        return project
+    for line in [l.strip() for l in md.splitlines() if l.strip()][:30]:
         if line.startswith("#") and "模式" not in line and "摘要" not in line:
             title = _strip_md(line)
-            title = re.sub(r"中心(稽查|质控)计划$", "", title).strip()
-            return title
-    return _extract_first([r"项目名称[:：]\s*\n?([^\n#|]+)", r"1\.1\s*项目名称[:：]?\s*\n?([^\n#|]+)"], md, "待补充项目名称")
+            return re.sub(r"中心(稽查|质控)计划$", "", title).strip()
+    return "待补充项目名称"
 
 
 def _version_parts(v: str) -> Tuple[str, str]:
@@ -183,33 +197,51 @@ def _extract_endpoint_rows(md: str) -> Tuple[List[Dict[str, str]], List[Dict[str
 def _extract_safety_rows(md: str) -> List[Dict[str, str]]:
     section = _section(md, ["2.5.3.4", "安全性信息处理与报告"], ["2.5.3.5", "临床试验数据记录", "2.5.4"])
     rows = _table_rows_by_headers(section if section else md, ["类别", "重点关注"])
-    return [{"category": r[0], "focus": r[1] if len(r) > 1 else ""} for r in rows if r and r[0] != "类别"]
+    clean_rows = []
+    for r in rows:
+        if not r or r[0] == "类别":
+            continue
+        focus = _strip_md(r[1] if len(r) > 1 else "")
+        focus = re.sub(r"(\n?·\s*)+$", "", focus).strip()
+        clean_rows.append({"category": r[0], "focus": focus})
+    return clean_rows
 
 
-def _extract_imp_description(md: str) -> str:
+def _extract_imp_spec_and_points(md: str) -> Tuple[str, str]:
     section = _section(md, ["2.5.4", "临床试验用药品管理"], ["2.5.5", "生物样本管理", "2.5.6"])
-    if not section:
-        return ""
     rows = _table_rows_by_headers(section, ["试验药物规格"])
-    parts = []
-    if rows:
-        parts.append(rows[0][0])
-    for line in section.splitlines():
+    spec = rows[0][0] if rows else ""
+    lines = []
+    for plain in _section_lines(md, ["2.5.4", "临床试验用药品管理"], ["2.5.5", "生物样本管理", "2.5.6"]):
+        if "试验药物规格" in plain or plain == spec:
+            continue
+        if "质控范围" in plain or "质控分工" in plain or "序号 |" in plain:
+            continue
+        lines.append(plain)
+    return spec, "\n".join(lines[:10])
+
+
+def _extract_biosample_points(md: str) -> str:
+    return "\n".join(_section_lines(md, ["2.5.5", "生物样本管理"], ["2.5.6", "中心实验室", "独立评估机构", "2.6", "三、"])[:10])
+
+
+def _extract_lab_points(md: str) -> str:
+    return "\n".join(_section_lines(md, ["2.5.6", "中心实验室及独立评估机构", "中心实验室"], ["2.6", "法规依据", "三、"])[:10])
+
+
+def _extract_summary(md: str) -> str:
+    sec = _section(md, ["摘要总结"], ["一、", "项目简介"])
+    lines = []
+    for line in sec.splitlines():
         plain = _strip_md(line)
-        if not plain or plain.startswith("|") or re.fullmatch(r"[-| ]+", plain):
-            continue
-        if "2.4 质控分工" in plain or "质控范围" in plain:
-            continue
-        if plain.startswith("试验药物规格"):
-            continue
-        if plain not in parts:
-            parts.append(plain)
-    return "\n".join(parts[:10])
+        if plain and not plain.startswith("|") and not re.fullmatch(r"[-| ]+", plain):
+            lines.append(plain)
+    return "\n".join(lines[:18])
 
 
 def parse_markdown_to_template_data(md_text: str) -> Dict[str, Any]:
     md = md_text.replace("\r\n", "\n")
-    title = _extract_title(md)
+    project_name = _extract_title(md)
     sponsor = _find_label_value(md, ["申办方", "申办者"])
     company = _find_label_value(md, ["质控公司", "稽查公司"]) or "北京万宁睿和医药科技有限公司"
     version_no, version_date = _version_parts(_find_label_value(md, ["版本号/版本日期", "版本号", "版本日期"]))
@@ -219,14 +251,13 @@ def parse_markdown_to_template_data(md_text: str) -> Dict[str, Any]:
     else:
         author, approver = author_approver or "苗田", "待审批"
 
-    project_name = _extract_first([r"###\s*1\.1\s*项目名称[:：]?\s*\n([^#]+?)\n\s*###", r"1\.1\s*项目名称[:：]?\s*\n([^#]+?)\n\s*1\.2", r"项目名称[:：]\s*([^\n]+)"], md, title)
-    project_name = _strip_md(project_name) or title
     audit_type = _extract_first([r"###\s*1\.2\s*质控类型[:：]?\s*\n([^#]+?)\n\s*###", r"1\.2\s*质控类型[:：]?\s*\n([^#]+?)\n\s*1\.3", r"质控类型[:：]\s*([^\n]+)"], md, "中心常规质控")
     sponsor2 = _extract_first([r"###\s*1\.3\s*申办方[:：]?\s*\n([^#]+?)\n\s*###", r"1\.3\s*申办方[:：]?\s*\n([^#]+?)\n\s*1\.4", r"申办方[:：]\s*([^\n|]+)"], md, sponsor)
     sponsor = _strip_md(sponsor2) or sponsor
 
     criteria, exclusions, process = _extract_criteria_rows(md)
     primary, secondary = _extract_endpoint_rows(md)
+    imp_spec, imp_points = _extract_imp_spec_and_points(md)
 
     return {
         "AUTHOR": author,
@@ -238,7 +269,11 @@ def parse_markdown_to_template_data(md_text: str) -> Dict[str, Any]:
         "VERSION_NO": version_no,
         "VERSION_DATE": version_date,
         "AUDIT_TYPE": audit_type,
-        "IMP_DESCRIPTION": _extract_imp_description(md),
+        "SUMMARY_TEXT": _extract_summary(md),
+        "IMP_SPEC": imp_spec,
+        "IMP_DESCRIPTION": imp_points,
+        "BIOSAMPLE_DESCRIPTION": _extract_biosample_points(md),
+        "LAB_DESCRIPTION": _extract_lab_points(md),
         "project": {"name": project_name, "sponsor": sponsor, "protocol_code": _extract_protocol_code(md), "version_no": version_no, "version_date": version_date, "audit_type": audit_type},
         "protocol_analysis": {"study_design": _extract_first([r"本临床试验为(.+?)(?:。|\n)", r"研究设计[:：]\s*([^\n]+)"], md, ""), "primary_endpoint": primary[0]["endpoint"] if primary else "", "key_criteria": "；".join([x["criterion"] for x in criteria[:4] + exclusions[:4]])},
         "criteria_ai_rows": criteria,
