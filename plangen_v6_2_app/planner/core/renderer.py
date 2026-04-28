@@ -133,13 +133,15 @@ def _replace_labeled_paragraph(doc: Document, label: str, value: Any) -> None:
             return
 
 
-def _replace_cover_title(doc: Document, title: str) -> None:
-    title = _safe_text(title)
-    if not title:
-        return
+def _replace_cover_title(doc, title):
     for i, p in enumerate(doc.paragraphs):
         if "中心质控计划" in p.text and i > 0:
-            _set_paragraph_text_preserve_style(doc.paragraphs[i - 1], title)
+            target = doc.paragraphs[i - 1]
+
+            for run in target.runs:
+                run.text = ""
+
+            target.runs[0].text = title
             return
 
 
