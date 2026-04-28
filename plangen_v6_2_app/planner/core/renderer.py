@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from typing import Any, Dict, Iterable, List, Optional
@@ -48,14 +49,10 @@ def _clean_black_squares(text: str) -> str:
         t = line.strip()
         if not t or t in {"■", "▪", "·", "•", "-"}:
             continue
-        t = re_sub_square_prefix(t)
-        lines.append(t)
+        t = re.sub(r"^[■▪·•]\s*", "", t).strip()
+        if t:
+            lines.append(t)
     return "\n".join(lines)
-
-
-def re_sub_square_prefix(text: str) -> str:
-    import re
-    return re.sub(r"^[■▪]\s*", "", text).strip()
 
 
 def _set_cell_text_preserve_style(cell, text: Any) -> None:
@@ -73,6 +70,12 @@ def _set_cell_text_preserve_style(cell, text: Any) -> None:
                 r.text = ""
     else:
         cell.text = text
+
+
+def _clear_cell(cell) -> None:
+    for p in cell.paragraphs:
+        for r in p.runs:
+            r.text = ""
 
 
 def _fill_row(row, values: Iterable[Any]) -> None:
@@ -114,11 +117,16 @@ def _header_text(table: Table) -> str:
     return "|".join(c.text.strip().replace("\n", "") for c in table.rows[0].cells)
 
 
+def _table_text(table: Table) -> str:
+    return "\n".join("|".join(c.text.strip() for c in row.cells) for row in table.rows)
+
+
 def _find_table(doc: Document, headers: List[str], occurrence: int = 1) -> Optional[Table]:
     count = 0
     for table in doc.tables:
         h = _header_text(table)
-        if all(x in h for x in headers):
+        all_text = _table_text(table)
+        if all(x in h or x in all_text for x in headers):
             count += 1
             if count == occurrence:
                 return table
@@ -165,10 +173,9 @@ def _replace_cover_title(doc: Document, title: str) -> None:
                 run.text = ""
             run = target.runs[0]
             run.text = title
-            run.font.size = Pt(18)  # 小二
+            run.font.size = Pt(18)
             run.font.bold = False
             target.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            # 清理标题前一段可能残留的“一项 xxxxx研究（XXXX）”占位
             if i > 1 and ("xxxxx" in doc.paragraphs[i - 2].text or "XXXXXXXX" in doc.paragraphs[i - 2].text):
                 _set_paragraph_text_preserve_style(doc.paragraphs[i - 2], "")
             return
@@ -239,6 +246,34 @@ def _replace_placeholders(doc: Document, data: Dict[str, Any]) -> None:
             _set_paragraph_text_preserve_style(p, text)
 
 
+def _remove_empty_bullet_paragraphs_from_table(table: Optional[Table]) -> None:
+    if table is None:
+        return
+    for row in table.rows:
+        for cell in row.cells:
+            for p in cell.paragraphs:
+                txt = p.text.strip().replace("↵", "")
+                if txt in {"■", "▪", "·", "•", "-"}:
+                    _set_paragraph_text_preserve_style(p, "")
+                elif txt.startswith("■") or txt.startswith("▪"):
+                    _set_paragraph_text_preserve_style(p, re.sub(r"^[■▪]\s*", "", txt).strip())
+
+
+def _fill_imp_table(doc: Document, data: Dict[str, Any]) -> None:
+    spec = data.get("IMP_SPEC", "") or data.get("IMP_DESCRIPTION", "")
+    if not spec:
+        return
+    table = _find_table(doc, ["试验药物规格"])
+    if table is None or len(table.rows) == 0:
+        return
+    # 该模板药品规格表通常为一行两列：左侧字段名，右侧填写内容。强制写入最右侧单元格。
+    row = table.rows[0]
+    if len(row.cells) >= 2:
+        _set_cell_text_preserve_style(row.cells[-1], spec)
+    else:
+        _set_cell_text_preserve_style(row.cells[0], spec)
+
+
 def _render_markdown_data_to_template(doc: Document, data: Dict[str, Any]) -> None:
     criteria_rows = list(data.get("criteria_ai_rows", []) or []) + list(data.get("exclusion_ai_rows", []) or [])
     process_rows = list(data.get("process_requirement_rows", []) or [])
@@ -250,11 +285,10 @@ def _render_markdown_data_to_template(doc: Document, data: Dict[str, Any]) -> No
     _replace_table_rows(_find_table(doc, ["方案描述", "重点关注"], occurrence=1), process_rows, lambda r: [r.get("requirement", ""), r.get("focus", "")])
     endpoint_table = _find_table(doc, ["主要目的", "主要终点"]) or _find_table(doc, ["主要目的/次要目的", "主要终点/次要终点"])
     _replace_table_rows(endpoint_table, endpoint_rows, lambda r: [r.get("objective", r.get("purpose", "")), r.get("endpoint", "")])
-    _replace_table_rows(_find_table(doc, ["类别", "重点关注"], occurrence=1), data.get("safety_focus_rows", []) or [], lambda r: [r.get("category", ""), r.get("focus", "")])
-    imp_table = _find_table(doc, ["试验药物规格", "剂型"])
-    if imp_table is not None and (data.get("IMP_SPEC") or data.get("IMP_DESCRIPTION")):
-        spec = data.get("IMP_SPEC") or data.get("IMP_DESCRIPTION")
-        _replace_table_rows(imp_table, [{"spec": spec}], lambda r: [r.get("spec", ""), ""])
+    safety_table = _find_table(doc, ["类别", "重点关注"], occurrence=1)
+    _replace_table_rows(safety_table, data.get("safety_focus_rows", []) or [], lambda r: [r.get("category", ""), r.get("focus", "")])
+    _remove_empty_bullet_paragraphs_from_table(safety_table)
+    _fill_imp_table(doc, data)
     _replace_table_rows(_find_table(doc, ["姓名", "邮箱", "职位/公司"]), data.get("report_send_rows", []) or [], lambda r: [r.get("name", ""), r.get("email", ""), r.get("title_company", "")])
     _fill_summary(doc, data)
     _fill_section_after_heading(doc, ["2.5.4临床试验用药品管理", "2.5.4 临床试验用药品管理"], data.get("IMP_DESCRIPTION", ""))
