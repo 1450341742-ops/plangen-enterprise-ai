@@ -13,14 +13,14 @@ from docx.shared import Pt
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
+KEEP_UNCHANGED_MARK = "保持以下文字不变"
+
 
 def enrich_template_context(data: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(data)
     project = dict(data.get("project", {}))
     title = project.get("name", data.get("PROJECT_TITLE", ""))
     data["PROJECT_TITLE"] = title
-    data["PROJECT_TITLE_LINE1"] = title[:28]
-    data["PROJECT_TITLE_LINE2"] = title[28:] if len(title) > 28 else ""
     data["SPONSOR_NAME"] = project.get("sponsor", data.get("SPONSOR_NAME", ""))
     data["PROJECT_CODE"] = project.get("protocol_code", data.get("PROJECT_CODE", ""))
     data["VERSION_NO"] = project.get("version_no", data.get("VERSION_NO", "V1.0"))
@@ -29,20 +29,16 @@ def enrich_template_context(data: Dict[str, Any]) -> Dict[str, Any]:
     data.setdefault("AUTHOR", "苗田")
     data.setdefault("APPROVER", "张艳")
     data.setdefault("AUDIT_COMPANY", "北京万宁睿和医药科技有限公司")
-    pa = data.get("protocol_analysis", {}) or {}
-    data["PRIMARY_OBJECTIVE"] = pa.get("primary_endpoint", "")
     return data
 
 
 def _safe_text(value: Any) -> str:
     if value is None:
         return ""
-    text = str(value).replace("[填写]", "待填写").strip()
-    text = text.replace("↵", "").replace("\r", "\n")
-    return text
+    return str(value).replace("[填写]", "待填写").replace("↵", "").replace("\r", "\n").strip()
 
 
-def _clean_black_squares(text: str) -> str:
+def _clean_text(text: Any) -> str:
     text = _safe_text(text)
     lines = []
     for line in text.split("\n"):
@@ -55,60 +51,71 @@ def _clean_black_squares(text: str) -> str:
     return "\n".join(lines)
 
 
-def _set_cell_text_preserve_style(cell, text: Any) -> None:
-    text = _clean_black_squares(text)
-    if cell.paragraphs:
-        p = cell.paragraphs[0]
-        if p.runs:
-            p.runs[0].text = text
-            for r in p.runs[1:]:
-                r.text = ""
-        else:
-            p.add_run(text)
-        for extra_p in cell.paragraphs[1:]:
-            for r in extra_p.runs:
-                r.text = ""
-    else:
-        cell.text = text
+def _set_run_font(run, size_pt: int, bold: bool = False) -> None:
+    run.font.name = "宋体"
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体") if hasattr(run._element.rPr, "rFonts") else None
+    run.font.size = Pt(size_pt)
+    run.font.bold = bold
 
 
-def _clear_cell(cell) -> None:
-    for p in cell.paragraphs:
-        for r in p.runs:
+def qn(tag: str):
+    from docx.oxml.ns import qn as _qn
+    return _qn(tag)
+
+
+def _set_cell_text(cell, text: Any, size_pt: int = 10, bold: bool = False) -> None:
+    text = _clean_text(text)
+    if not cell.paragraphs:
+        cell.text = ""
+    p = cell.paragraphs[0]
+    if not p.runs:
+        p.add_run("")
+    p.runs[0].text = text
+    _set_run_font(p.runs[0], size_pt, bold)
+    for r in p.runs[1:]:
+        r.text = ""
+    for extra_p in cell.paragraphs[1:]:
+        for r in extra_p.runs:
             r.text = ""
 
 
-def _fill_row(row, values: Iterable[Any]) -> None:
-    for i, value in enumerate(list(values)):
-        if i < len(row.cells):
-            _set_cell_text_preserve_style(row.cells[i], value)
+def _set_para_text(p: Paragraph, text: Any, size_pt: int = 10, bold: bool = False, align=None) -> None:
+    text = _clean_text(text)
+    if not p.runs:
+        p.add_run("")
+    p.runs[0].text = text
+    _set_run_font(p.runs[0], size_pt, bold)
+    for r in p.runs[1:]:
+        r.text = ""
+    if align is not None:
+        p.alignment = align
 
 
-def _clone_row(table: Table, template_row_idx: int):
-    if len(table.rows) == 0:
-        raise ValueError("模板表格没有行，无法复制样式")
-    idx = min(template_row_idx, len(table.rows) - 1)
-    table._tbl.append(deepcopy(table.rows[idx]._tr))
-    return table.rows[-1]
+def _is_heading_text(text: str) -> bool:
+    t = text.strip().replace(" ", "")
+    return bool(re.match(r"^(一、|二、|三、|\d+(\.\d+)+)", t))
 
 
-def _trim_table_to_template_row(table: Table, template_idx: int = 1) -> None:
-    if len(table.rows) == 0:
-        return
-    template_idx = min(template_idx, len(table.rows) - 1)
-    while len(table.rows) > template_idx + 1:
-        table._tbl.remove(table.rows[-1]._tr)
-
-
-def _replace_table_rows(table: Optional[Table], rows: List[Dict[str, Any]], row_builder) -> None:
-    if table is None or not rows or len(table.rows) == 0:
-        return
-    template_idx = 1 if len(table.rows) > 1 else 0
-    _trim_table_to_template_row(table, template_idx)
-    _fill_row(table.rows[template_idx], row_builder(rows[0]))
-    for item in rows[1:]:
-        row = _clone_row(table, template_idx)
-        _fill_row(row, row_builder(item))
+def _normalize_styles(doc: Document) -> None:
+    for p in doc.paragraphs:
+        txt = p.text.strip()
+        if not txt:
+            continue
+        if _is_heading_text(txt):
+            for r in p.runs:
+                if r.text:
+                    _set_run_font(r, 16, True)  # 三号
+        else:
+            for r in p.runs:
+                if r.text:
+                    _set_run_font(r, 10, False)  # 五号
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    for r in p.runs:
+                        if r.text:
+                            _set_run_font(r, 10, False)
 
 
 def _header_text(table: Table) -> str:
@@ -124,96 +131,70 @@ def _table_text(table: Table) -> str:
 def _find_table(doc: Document, headers: List[str], occurrence: int = 1) -> Optional[Table]:
     count = 0
     for table in doc.tables:
-        h = _header_text(table)
-        all_text = _table_text(table)
-        if all(x in h or x in all_text for x in headers):
+        text = _header_text(table) + "\n" + _table_text(table)
+        if all(h in text for h in headers):
             count += 1
             if count == occurrence:
                 return table
     return None
 
 
-def _all_paragraphs(doc: Document):
-    for p in doc.paragraphs:
-        yield p
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    yield p
+def _clone_row(table: Table, idx: int):
+    idx = min(idx, len(table.rows) - 1)
+    table._tbl.append(deepcopy(table.rows[idx]._tr))
+    return table.rows[-1]
 
 
-def _set_paragraph_text_preserve_style(paragraph: Paragraph, text: Any) -> None:
-    text = _clean_black_squares(text)
-    if paragraph.runs:
-        paragraph.runs[0].text = text
-        for r in paragraph.runs[1:]:
-            r.text = ""
-    else:
-        paragraph.add_run(text)
+def _replace_table_rows(table: Optional[Table], rows: List[Dict[str, Any]], row_builder) -> None:
+    if table is None or not rows or not table.rows:
+        return
+    template_idx = 1 if len(table.rows) > 1 else 0
+    while len(table.rows) > template_idx + 1:
+        table._tbl.remove(table.rows[-1]._tr)
+    vals = row_builder(rows[0])
+    for i, v in enumerate(vals):
+        if i < len(table.rows[template_idx].cells):
+            _set_cell_text(table.rows[template_idx].cells[i], v)
+    for item in rows[1:]:
+        row = _clone_row(table, template_idx)
+        vals = row_builder(item)
+        for i, v in enumerate(vals):
+            if i < len(row.cells):
+                _set_cell_text(row.cells[i], v)
 
 
-def _replace_labeled_paragraph(doc: Document, label: str, value: Any) -> None:
-    for p in doc.paragraphs:
-        if label in p.text:
-            _set_paragraph_text_preserve_style(p, f"{label}{_safe_text(value)}")
-            return
+def _paragraph_index(doc: Document, keys: List[str]) -> Optional[int]:
+    for i, p in enumerate(doc.paragraphs):
+        text = p.text.replace(" ", "")
+        if any(k.replace(" ", "") in text for k in keys):
+            return i
+    return None
+
+
+def _section_is_keep(doc: Document, keys: List[str]) -> bool:
+    idx = _paragraph_index(doc, keys)
+    return idx is not None and KEEP_UNCHANGED_MARK in doc.paragraphs[idx].text
+
+
+def _fill_after_heading(doc: Document, keys: List[str], text: str) -> None:
+    if not text or _section_is_keep(doc, keys):
+        return
+    idx = _paragraph_index(doc, keys)
+    if idx is not None and idx + 1 < len(doc.paragraphs):
+        _set_para_text(doc.paragraphs[idx + 1], text, 10, False)
 
 
 def _replace_cover_title(doc: Document, title: str) -> None:
-    title = _safe_text(title)
-    if not title:
+    idx = _paragraph_index(doc, ["中心质控计划"])
+    if idx is None:
         return
-    for i, p in enumerate(doc.paragraphs):
-        if "中心质控计划" in p.text and i > 0:
-            target = doc.paragraphs[i - 1]
-            if not target.runs:
-                target.add_run("")
-            for run in target.runs:
-                run.text = ""
-            run = target.runs[0]
-            run.text = title
-            run.font.size = Pt(18)
-            run.font.bold = False
-            target.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            if i > 1 and ("xxxxx" in doc.paragraphs[i - 2].text or "XXXXXXXX" in doc.paragraphs[i - 2].text):
-                _set_paragraph_text_preserve_style(doc.paragraphs[i - 2], "")
-            return
-
-
-def _fill_summary(doc: Document, data: Dict[str, Any]) -> None:
-    summary = data.get("SUMMARY_TEXT", "")
-    if not summary:
-        return
-    paras = doc.paragraphs
-    for i, p in enumerate(paras):
-        if "摘要总结" in p.text:
-            if i + 1 < len(paras):
-                _set_paragraph_text_preserve_style(paras[i + 1], summary)
-            return
-
-
-def _fill_section_after_heading(doc: Document, heading_keys: List[str], text: str) -> None:
-    text = _safe_text(text)
-    if not text:
-        return
-    paras = doc.paragraphs
-    for i, p in enumerate(paras):
-        if any(k in p.text for k in heading_keys):
-            if i + 1 < len(paras):
-                _set_paragraph_text_preserve_style(paras[i + 1], text)
-            return
+    # 新模板封面项目标题位于“中心质控计划”上一段，若为空也写入上一段。
+    target_idx = max(0, idx - 1)
+    _set_para_text(doc.paragraphs[target_idx], title, 18, True, WD_ALIGN_PARAGRAPH.CENTER)  # 小二 加粗 居中
 
 
 def _fill_basic_fields(doc: Document, data: Dict[str, Any]) -> None:
     title = data.get("PROJECT_TITLE", "")
-    sponsor = data.get("SPONSOR_NAME", "")
-    company = data.get("AUDIT_COMPANY", "北京万宁睿和医药科技有限公司")
-    version = data.get("VERSION_NO", "V1.0")
-    vdate = data.get("VERSION_DATE", "")
-    author = data.get("AUTHOR", "")
-    approver = data.get("APPROVER", "")
-    audit_type = data.get("AUDIT_TYPE", "中心常规质控")
     _replace_cover_title(doc, title)
     for table in doc.tables:
         for row in table.rows:
@@ -221,79 +202,52 @@ def _fill_basic_fields(doc: Document, data: Dict[str, Any]) -> None:
                 continue
             label = row.cells[0].text.replace("\n", "").replace(" ", "")
             if "申办方" in label or "申办者" in label:
-                _set_cell_text_preserve_style(row.cells[1], sponsor)
+                _set_cell_text(row.cells[1], data.get("SPONSOR_NAME", ""))
             elif "质控公司" in label or "稽查公司" in label:
-                _set_cell_text_preserve_style(row.cells[1], company)
+                _set_cell_text(row.cells[1], data.get("AUDIT_COMPANY", ""))
             elif "版本号/版本日期" in label:
-                _set_cell_text_preserve_style(row.cells[1], f"{version}/{vdate}" if vdate else version)
+                v = data.get("VERSION_NO", "V1.0")
+                d = data.get("VERSION_DATE", "")
+                _set_cell_text(row.cells[1], f"{v}/{d}" if d else v)
             elif "撰写人/审批人" in label:
-                _set_cell_text_preserve_style(row.cells[1], f"{author}/{approver}" if approver else author)
-    _replace_labeled_paragraph(doc, "1.1项目名称：", title)
-    _replace_labeled_paragraph(doc, "1.2质控类型：", audit_type)
-    _replace_labeled_paragraph(doc, "1.3申办方：", sponsor)
+                a = data.get("AUTHOR", "")
+                ap = data.get("APPROVER", "")
+                _set_cell_text(row.cells[1], f"{a}/{ap}" if ap else a)
+    for label, value in [("1.1项目名称：", title), ("1.2质控类型：", data.get("AUDIT_TYPE", "")), ("1.3申办方：", data.get("SPONSOR_NAME", ""))]:
+        idx = _paragraph_index(doc, [label])
+        if idx is not None:
+            _set_para_text(doc.paragraphs[idx], f"{label}{value}", 16, True)
 
 
-def _replace_placeholders(doc: Document, data: Dict[str, Any]) -> None:
-    flat = {k: v for k, v in data.items() if not isinstance(v, (dict, list))}
-    for k, v in (data.get("project", {}) or {}).items():
-        flat[f"project.{k}"] = v
-    for p in _all_paragraphs(doc):
-        original = p.text
-        text = original
-        for k, v in flat.items():
-            text = text.replace("{{" + str(k) + "}}", _safe_text(v))
-        if text != original:
-            _set_paragraph_text_preserve_style(p, text)
-
-
-def _remove_empty_bullet_paragraphs_from_table(table: Optional[Table]) -> None:
-    if table is None:
-        return
-    for row in table.rows:
-        for cell in row.cells:
-            for p in cell.paragraphs:
-                txt = p.text.strip().replace("↵", "")
-                if txt in {"■", "▪", "·", "•", "-"}:
-                    _set_paragraph_text_preserve_style(p, "")
-                elif txt.startswith("■") or txt.startswith("▪"):
-                    _set_paragraph_text_preserve_style(p, re.sub(r"^[■▪]\s*", "", txt).strip())
+def _fill_summary(doc: Document, data: Dict[str, Any]) -> None:
+    idx = _paragraph_index(doc, ["摘要总结"])
+    if idx is not None and idx + 1 < len(doc.paragraphs) and data.get("SUMMARY_TEXT"):
+        _set_para_text(doc.paragraphs[idx + 1], data.get("SUMMARY_TEXT"), 10, False)
 
 
 def _fill_imp_table(doc: Document, data: Dict[str, Any]) -> None:
-    spec = data.get("IMP_SPEC", "") or data.get("IMP_DESCRIPTION", "")
+    spec = data.get("IMP_SPEC", "")
     if not spec:
         return
     table = _find_table(doc, ["试验药物规格"])
-    if table is None or len(table.rows) == 0:
+    if table and table.rows:
+        row = table.rows[0]
+        if len(row.cells) >= 2:
+            _set_cell_text(row.cells[-1], spec, 10, False)
+
+
+def _insert_law_section(doc: Document, text: str) -> None:
+    # 模板已含 2.6 标题，只补充其下一段；如下一段为三、则插入新段。
+    idx = _paragraph_index(doc, ["2.6法规依据补充说明", "2.6 法规依据补充说明"])
+    if idx is None or not text:
         return
-    # 该模板药品规格表通常为一行两列：左侧字段名，右侧填写内容。强制写入最右侧单元格。
-    row = table.rows[0]
-    if len(row.cells) >= 2:
-        _set_cell_text_preserve_style(row.cells[-1], spec)
+    if idx + 1 < len(doc.paragraphs) and not doc.paragraphs[idx + 1].text.strip().startswith("三、"):
+        _set_para_text(doc.paragraphs[idx + 1], text, 10, False)
     else:
-        _set_cell_text_preserve_style(row.cells[0], spec)
-
-
-def _render_markdown_data_to_template(doc: Document, data: Dict[str, Any]) -> None:
-    criteria_rows = list(data.get("criteria_ai_rows", []) or []) + list(data.get("exclusion_ai_rows", []) or [])
-    process_rows = list(data.get("process_requirement_rows", []) or [])
-    endpoint_rows = list(data.get("primary_endpoint_rows", []) or []) + list(data.get("secondary_endpoint_rows", []) or [])
-    _replace_table_rows(_find_table(doc, ["数据风险因素", "详细信息"]), data.get("risk_analysis_rows", []) or [], lambda r: [r.get("risk_factor", ""), r.get("detail", "")])
-    _replace_table_rows(_find_table(doc, ["筛选号", "基本情况"]), data.get("subject_rows", []) or [], lambda r: [r.get("subject_id", ""), r.get("summary", r.get("protocol_version", ""))])
-    _replace_table_rows(_find_table(doc, ["序号", "质控流程", "负责质控人员"]), data.get("assignment_rows", []) or [], lambda r: [r.get("seq", ""), r.get("process", ""), r.get("assignee", ""), r.get("plan_time", "")])
-    _replace_table_rows(_find_table(doc, ["方案", "重点关注"], occurrence=1), criteria_rows, lambda r: [r.get("criterion", ""), r.get("ai_focus", "")])
-    _replace_table_rows(_find_table(doc, ["方案描述", "重点关注"], occurrence=1), process_rows, lambda r: [r.get("requirement", ""), r.get("focus", "")])
-    endpoint_table = _find_table(doc, ["主要目的", "主要终点"]) or _find_table(doc, ["主要目的/次要目的", "主要终点/次要终点"])
-    _replace_table_rows(endpoint_table, endpoint_rows, lambda r: [r.get("objective", r.get("purpose", "")), r.get("endpoint", "")])
-    safety_table = _find_table(doc, ["类别", "重点关注"], occurrence=1)
-    _replace_table_rows(safety_table, data.get("safety_focus_rows", []) or [], lambda r: [r.get("category", ""), r.get("focus", "")])
-    _remove_empty_bullet_paragraphs_from_table(safety_table)
-    _fill_imp_table(doc, data)
-    _replace_table_rows(_find_table(doc, ["姓名", "邮箱", "职位/公司"]), data.get("report_send_rows", []) or [], lambda r: [r.get("name", ""), r.get("email", ""), r.get("title_company", "")])
-    _fill_summary(doc, data)
-    _fill_section_after_heading(doc, ["2.5.4临床试验用药品管理", "2.5.4 临床试验用药品管理"], data.get("IMP_DESCRIPTION", ""))
-    _fill_section_after_heading(doc, ["2.5.5生物样本管理", "2.5.5 生物样本管理"], data.get("BIOSAMPLE_DESCRIPTION", ""))
-    _fill_section_after_heading(doc, ["2.5.6中心实验室", "2.5.6 中心实验室"], data.get("LAB_DESCRIPTION", ""))
+        p = doc.paragraphs[idx]._element.addnext(deepcopy(doc.paragraphs[idx]._element))
+        # fallback: modify next paragraph object after reloading not possible here, use direct nearby paragraph if exists
+        if idx + 1 < len(doc.paragraphs):
+            _set_para_text(doc.paragraphs[idx + 1], text, 10, False)
 
 
 def generate_docx_from_template(template_path: str | Path, data: Dict[str, Any], output_path: str | Path) -> Path:
@@ -303,9 +257,30 @@ def generate_docx_from_template(template_path: str | Path, data: Dict[str, Any],
         raise FileNotFoundError(f"模板不存在：{template_path}")
     data = enrich_template_context(data)
     doc = Document(str(template_path))
-    _replace_placeholders(doc, data)
+
     _fill_basic_fields(doc, data)
-    _render_markdown_data_to_template(doc, data)
+    _fill_summary(doc, data)
+
+    _replace_table_rows(_find_table(doc, ["数据风险因素", "详细信息"]), data.get("risk_analysis_rows", []) or [], lambda r: [r.get("risk_factor", ""), r.get("detail", "")])
+    _replace_table_rows(_find_table(doc, ["筛选号", "基本情况"]), data.get("subject_rows", []) or [], lambda r: [r.get("subject_id", ""), r.get("summary", "")])
+    _replace_table_rows(_find_table(doc, ["方案", "重点关注"], occurrence=1), (data.get("criteria_ai_rows", []) or []) + (data.get("exclusion_ai_rows", []) or []), lambda r: [r.get("criterion", ""), r.get("ai_focus", "")])
+    _replace_table_rows(_find_table(doc, ["方案描述", "重点关注"], occurrence=1), data.get("process_requirement_rows", []) or [], lambda r: [r.get("requirement", ""), r.get("focus", "")])
+    _replace_table_rows(_find_table(doc, ["主要目的", "主要终点"]), (data.get("primary_endpoint_rows", []) or []) + (data.get("secondary_endpoint_rows", []) or []), lambda r: [r.get("objective", r.get("purpose", "")), r.get("endpoint", "")])
+
+    # 带“保持以下文字不变”的章节不覆盖：2.5.3.4、2.5.3.5、2.5.5、2.5.6
+    if not _section_is_keep(doc, ["2.5.3.4安全性信息处理与报告", "2.5.3.4 安全性信息处理与报告"]):
+        _replace_table_rows(_find_table(doc, ["类别", "重点关注"], occurrence=1), data.get("safety_focus_rows", []) or [], lambda r: [r.get("category", ""), r.get("focus", "")])
+    _fill_imp_table(doc, data)
+    _fill_after_heading(doc, ["2.5.4临床试验用药品管理", "2.5.4 临床试验用药品管理"], data.get("IMP_DESCRIPTION", ""))
+    _fill_after_heading(doc, ["2.5.5生物样本管理", "2.5.5 生物样本管理"], data.get("BIOSAMPLE_DESCRIPTION", ""))
+    _fill_after_heading(doc, ["2.5.6中心实验室", "2.5.6 中心实验室"], data.get("LAB_DESCRIPTION", ""))
+    _insert_law_section(doc, data.get("LAW_SUPPLEMENT", ""))
+
+    _replace_table_rows(_find_table(doc, ["姓名", "邮箱", "职位/公司"]), data.get("report_send_rows", []) or [], lambda r: [r.get("name", ""), r.get("email", ""), r.get("title_company", "")])
+    _normalize_styles(doc)
+    # 封面标题需在全局样式后再次设定，避免被 normalize 覆盖。
+    _replace_cover_title(doc, data.get("PROJECT_TITLE", ""))
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
     return output_path
@@ -313,19 +288,12 @@ def generate_docx_from_template(template_path: str | Path, data: Dict[str, Any],
 
 def convert_docx_to_pdf(docx_path: str | Path, pdf_path: str | Path | None = None, output_dir: str | Path | None = None) -> Path | None:
     docx_path = Path(docx_path)
-    if pdf_path is not None:
-        pdf_path = Path(pdf_path)
-    elif output_dir is not None:
-        pdf_path = Path(output_dir) / docx_path.with_suffix(".pdf").name
-    else:
-        pdf_path = docx_path.with_suffix(".pdf")
+    pdf_path = Path(output_dir) / docx_path.with_suffix(".pdf").name if output_dir else docx_path.with_suffix(".pdf")
     soffice = shutil.which("soffice")
     if not soffice:
         return None
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run([soffice, "--headless", "--convert-to", "pdf", "--outdir", str(pdf_path.parent), str(docx_path)], check=True, capture_output=True, text=True)
     except Exception:
         return None
-    generated = pdf_path.parent / docx_path.with_suffix(".pdf").name
-    return pdf_path if pdf_path.exists() else generated if generated.exists() else None
+    return pdf_path if pdf_path.exists() else None
