@@ -4,8 +4,8 @@ import re
 from typing import Any, Dict, List, Tuple
 
 PROCESS_KEYS = ["随机化要求", "随机要求", "复筛要求", "终止治疗要求", "退出研究要求", "禁止合并治疗要求", "限制用药要求", "药物剂量调整规则", "剂量调整", "关键时间窗要求"]
-DIRTY_KEYWORDS = ["质控范围", "质控分工", "序号 |", "研究者文件夹", "受试者文件夹", "安全性信息的收集", "临床试验质量管理体系", "供应商管理", "受试者知情同意过程及文件", "受试者筛选、入组", "临床试验数据记录、报告及溯源"]
-PLACEHOLDERS = {"待填写", "xxxxx", "xxxxxx", "xxx", "[填写]"}
+DIRTY_KEYWORDS = ["质控范围", "质控分工", "序号 |", "研究者文件夹", "受试者文件夹", "安全性信息的收集", "临床试验质量管理体系", "供应商管理", "受试者知情同意过程及文件", "受试者筛选、入组", "临床试验数据记录、报告及溯源", "中心稽查风险评估病历抽取原则", "发生major PD", "全部SAE", "首例、末例", "同日签署知情同意", "进展事件多发", "HIS/LIS/PACS", "试验用药品管理、生物样本管理"]
+PLACEHOLDERS = {"待填写", "xxxxx", "xxxxxx", "xxx", "[填写]", "其他"}
 
 
 def _clean(text: str) -> str:
@@ -23,7 +23,7 @@ def _clean(text: str) -> str:
 def _strip_md(text: str) -> str:
     text = _clean(text)
     text = re.sub(r"^#{1,6}\s*", "", text)
-    text = re.sub(r"^[\-\*+·]\s*", "", text)
+    text = re.sub(r"^[\-\*+·■▪•]\s*", "", text)
     return text.strip(" |\t")
 
 
@@ -32,6 +32,10 @@ def _is_dirty_line(text: str) -> bool:
     if not t or t in PLACEHOLDERS:
         return True
     if re.fullmatch(r"[-| ]+", t):
+        return True
+    if re.match(r"^\d+\s*\|", t):
+        return True
+    if "|" in t and ("待填写" in t or "质控流程" in t or "计划时间" in t):
         return True
     if any(k in t for k in DIRTY_KEYWORDS):
         return True
@@ -103,9 +107,8 @@ def _section(md: str, start_keys: List[str], stop_keys: List[str] | None = None)
         if not plain:
             continue
         if stop_keys and any(k in plain for k in stop_keys):
-            if raw.startswith("#") or re.match(r"^(\d+\.)?\d+(\.\d+)+", plain) or plain.startswith("三、") or plain.startswith("一、"):
-                end = j
-                break
+            end = j
+            break
     return "\n".join(lines[start:end]).strip()
 
 
