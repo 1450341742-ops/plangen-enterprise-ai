@@ -25,7 +25,7 @@ FIELD_ALIASES = {
     "方案编号": ["PROJECT_CODE", "project.protocol_code"],
     "质控类型": ["AUDIT_TYPE", "project.audit_type"],
     "摘要总结": ["SUMMARY_TEXT"],
-    "抽取原则": ["RISK_SAMPLING_RULE", "SAMPLING_PRINCIPLE"],
+    "抽取原则": ["SAMPLING_PRINCIPLE", "RISK_SAMPLING_RULE"],
     "中心稽查风险评估病历抽取原则": ["RISK_SAMPLING_RULE", "SAMPLING_PRINCIPLE"],
     "试验药物规格/剂型/剂量/给药方式/剂量调整": ["IMP_SPEC", "IMP_DESCRIPTION"],
     "试验药物规格": ["IMP_SPEC", "IMP_DESCRIPTION"],
@@ -83,9 +83,7 @@ def _clean_generated_text(text: Any) -> str:
     out = []
     for line in text.replace("\r", "\n").split("\n"):
         t = line.strip()
-        if not t:
-            continue
-        if t in EMPTY_BULLETS:
+        if not t or t in EMPTY_BULLETS:
             continue
         if re.fullmatch(r"[·•■▪\-—_\s]+", t):
             continue
@@ -139,6 +137,12 @@ def _infer_table_type(table) -> str:
     text = _table_text(table)
     if _is_keep_text(text):
         return "keep"
+    if "随机化程序-方案描述" in text or "随机化程序-重点关注" in text:
+        return "process"
+    if "主要目的" in text and ("主要终点" in text or "次要终点" in text):
+        return "endpoint"
+    if "入选/排除标准" in text:
+        return "criteria"
     for name, headers in TABLE_TYPES.items():
         if all(h in text for h in headers):
             return name
@@ -182,7 +186,6 @@ def _fill_dynamic_table(table, rows: List[Dict[str, Any]], table_type: str) -> N
     if not rows or not table.rows:
         return
     template_idx = 1 if len(table.rows) > 1 else 0
-    # 如果模板样例行含{{占位符}}，删除后续多余样例行；如果没有，则只覆盖第一数据行。
     while len(table.rows) > template_idx + 1:
         table._tbl.remove(table.rows[-1]._tr)
     while len(table.rows) < template_idx + 1 + len(rows):
@@ -209,20 +212,49 @@ def _find_cover_title_paragraph(doc: Document):
     return None
 
 
+def _cell_effective_text(cell) -> str:
+    return _clean_generated_text(cell.text)
+
+
+def _remove_empty_rows_in_tables(doc: Document) -> None:
+    for table in doc.tables:
+        protected_header = _is_keep_text(_table_text(table))
+        # 固定安全性章节中，只删除右侧内容为空且非原始分类行的空bullet，不删除表格固定行。
+        for row in list(table.rows)[1:]:
+            row_text = " | ".join(_cell_effective_text(c) for c in row.cells)
+            if not row_text.strip() and not protected_header:
+                try:
+                    table._tbl.remove(row._tr)
+                except Exception:
+                    pass
+
+
 def _clear_empty_bullet_paragraphs(doc: Document) -> None:
+    pattern = re.compile(r"^[\s\n\r·•■▪\-—_]+$")
     for p in doc.paragraphs:
-        if _clean_generated_text(p.text) == "":
+        if pattern.fullmatch(p.text or ""):
             for r in p.runs:
-                if r.text.strip() in EMPTY_BULLETS or re.fullmatch(r"[·•■▪\-—_\s]+", r.text or ""):
-                    r.text = ""
+                r.text = ""
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
-                    if _clean_generated_text(p.text) == "":
+                    if pattern.fullmatch(p.text or ""):
                         for r in p.runs:
-                            if r.text.strip() in EMPTY_BULLETS or re.fullmatch(r"[·•■▪\-—_\s]+", r.text or ""):
-                                r.text = ""
+                            r.text = ""
+
+
+def _fill_field_cells_by_left_label(doc: Document, data: Dict[str, Any]) -> None:
+    for table in doc.tables:
+        if _is_keep_text(_table_text(table)):
+            continue
+        for row in table.rows:
+            if len(row.cells) < 2:
+                continue
+            left = row.cells[0].text
+            value = _best_value(left, data)
+            if value and (_has_placeholder(row.cells[1].text) or not row.cells[1].text.strip()):
+                _set_cell_text(row.cells[1], value)
 
 
 def adaptive_map_template(template_path: str | Path, data: Dict[str, Any], output_path: str | Path) -> Path:
@@ -251,7 +283,6 @@ def adaptive_map_template(template_path: str | Path, data: Dict[str, Any], outpu
     for table in doc.tables:
         table_text = _table_text(table)
         if _is_keep_text(table_text):
-            # 固定章节内仍允许替换明确占位符，例如AESI；但不允许循环表覆盖。
             for row in table.rows:
                 for cell in row.cells:
                     if "{{" in cell.text and "}}" in cell.text:
@@ -259,13 +290,11 @@ def adaptive_map_template(template_path: str | Path, data: Dict[str, Any], outpu
                         if new_text != cell.text:
                             _set_cell_text(cell, new_text)
             continue
-
         t_type = _infer_table_type(table)
         rows = _rows_for_type(data, t_type)
         if rows:
             _fill_dynamic_table(table, rows, t_type)
             continue
-
         for row in table.rows:
             for idx, cell in enumerate(row.cells):
                 if not _has_placeholder(cell.text):
@@ -280,7 +309,9 @@ def adaptive_map_template(template_path: str | Path, data: Dict[str, Any], outpu
                 if value:
                     _set_cell_text(cell, value)
 
+    _fill_field_cells_by_left_label(doc, data)
     _clear_empty_bullet_paragraphs(doc)
+    _remove_empty_rows_in_tables(doc)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
