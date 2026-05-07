@@ -133,9 +133,14 @@ def _table_text(table) -> str:
     return "\n".join("|".join(c.text.strip() for c in row.cells) for row in table.rows)
 
 
+def _is_safety_keep_table(table) -> bool:
+    text = _table_text(table)
+    return "保持以下文字不变" in text or ("生命体征/护理记录单" in text and "严重不良事件" in text)
+
+
 def _infer_table_type(table) -> str:
     text = _table_text(table)
-    if _is_keep_text(text):
+    if _is_safety_keep_table(table) or _is_keep_text(text):
         return "keep"
     if "随机化程序-方案描述" in text or "随机化程序-重点关注" in text:
         return "process"
@@ -218,11 +223,11 @@ def _cell_effective_text(cell) -> str:
 
 def _remove_empty_rows_in_tables(doc: Document) -> None:
     for table in doc.tables:
-        protected_header = _is_keep_text(_table_text(table))
-        # 固定安全性章节中，只删除右侧内容为空且非原始分类行的空bullet，不删除表格固定行。
+        if _is_safety_keep_table(table):
+            continue
         for row in list(table.rows)[1:]:
             row_text = " | ".join(_cell_effective_text(c) for c in row.cells)
-            if not row_text.strip() and not protected_header:
+            if not row_text.strip():
                 try:
                     table._tbl.remove(row._tr)
                 except Exception:
@@ -230,6 +235,7 @@ def _remove_empty_rows_in_tables(doc: Document) -> None:
 
 
 def _clear_empty_bullet_paragraphs(doc: Document) -> None:
+    # 不能彻底删除段落，只清空“只有符号”的run，避免影响模板结构。
     pattern = re.compile(r"^[\s\n\r·•■▪\-—_]+$")
     for p in doc.paragraphs:
         if pattern.fullmatch(p.text or ""):
@@ -238,7 +244,8 @@ def _clear_empty_bullet_paragraphs(doc: Document) -> None:
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                for p in cell.paragraphs:
+                paras = cell.paragraphs
+                for p in paras:
                     if pattern.fullmatch(p.text or ""):
                         for r in p.runs:
                             r.text = ""
@@ -246,7 +253,7 @@ def _clear_empty_bullet_paragraphs(doc: Document) -> None:
 
 def _fill_field_cells_by_left_label(doc: Document, data: Dict[str, Any]) -> None:
     for table in doc.tables:
-        if _is_keep_text(_table_text(table)):
+        if _is_safety_keep_table(table):
             continue
         for row in table.rows:
             if len(row.cells) < 2:
@@ -255,6 +262,30 @@ def _fill_field_cells_by_left_label(doc: Document, data: Dict[str, Any]) -> None
             value = _best_value(left, data)
             if value and (_has_placeholder(row.cells[1].text) or not row.cells[1].text.strip()):
                 _set_cell_text(row.cells[1], value)
+
+
+def _force_fill_sampling(doc: Document, data: Dict[str, Any]) -> None:
+    value = _get_value(data, "SAMPLING_PRINCIPLE") or _get_value(data, "RISK_SAMPLING_RULE")
+    if not value:
+        return
+    for table in doc.tables:
+        if _is_safety_keep_table(table):
+            continue
+        for row in table.rows:
+            if len(row.cells) >= 2 and "抽取原则" in row.cells[0].text:
+                _set_cell_text(row.cells[1], value)
+
+
+def _force_keep_safety_template(doc: Document) -> None:
+    # 防止历史错误生成内容污染安全性固定表：如左侧出现入选/排除标准，恢复为空，避免继续显示错映射。
+    for table in doc.tables:
+        if not _is_safety_keep_table(table):
+            continue
+        for row in table.rows[1:]:
+            left = row.cells[0].text.strip()
+            if left.startswith("入选标准") or left.startswith("排除标准"):
+                _set_cell_text(row.cells[0], "")
+                _set_cell_text(row.cells[1], "")
 
 
 def adaptive_map_template(template_path: str | Path, data: Dict[str, Any], output_path: str | Path) -> Path:
@@ -282,7 +313,7 @@ def adaptive_map_template(template_path: str | Path, data: Dict[str, Any], outpu
 
     for table in doc.tables:
         table_text = _table_text(table)
-        if _is_keep_text(table_text):
+        if _is_safety_keep_table(table) or _is_keep_text(table_text):
             for row in table.rows:
                 for cell in row.cells:
                     if "{{" in cell.text and "}}" in cell.text:
@@ -310,6 +341,8 @@ def adaptive_map_template(template_path: str | Path, data: Dict[str, Any], outpu
                     _set_cell_text(cell, value)
 
     _fill_field_cells_by_left_label(doc, data)
+    _force_fill_sampling(doc, data)
+    _force_keep_safety_template(doc)
     _clear_empty_bullet_paragraphs(doc)
     _remove_empty_rows_in_tables(doc)
     output_path = Path(output_path)
