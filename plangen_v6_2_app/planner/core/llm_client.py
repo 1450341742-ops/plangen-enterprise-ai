@@ -5,6 +5,8 @@ from pathlib import Path
 import requests
 from typing import Any, Dict, List
 
+from planner.core.rag_engine import retrieve_knowledge, list_knowledge_files
+
 
 class LLMClientError(Exception):
     pass
@@ -42,9 +44,13 @@ def load_knowledge_base() -> str:
 def build_plangen_prompt(user_prompt: str, protocol_text: str = "", extra_context: str = "") -> str:
     kb_text = load_knowledge_base()
 
+    rag_query = f"{user_prompt}\n{protocol_text[:4000]}"
+    rag_context = retrieve_knowledge(rag_query, top_k=8)
+    kb_files = list_knowledge_files()
+
     return f"""
-你是临床试验中心质控计划生成智能体。
-请严格参考知识库规则、模板规则、RBQM规则、法规规则生成内容。
+你是万宁睿和第三方稽查公司AI质控专家。
+请严格参考企业知识库、RAG召回内容、RBQM规则、FDA/CFDI核查逻辑生成中心质控计划。
 
 # 系统要求
 - 输出必须可供PlanGen映射Word模板。
@@ -74,6 +80,7 @@ def build_plangen_prompt(user_prompt: str, protocol_text: str = "", extra_contex
 - IMP部分必须明确规格、剂型、剂量、给药方式、剂量调整。
 - 生物样本管理必须包含：采集、运输、保存、时间窗、异常处理。
 - 中心实验室部分必须包含：CAP/CLIA、EDC、IWRS、供应商管理。
+- 输出风格应接近资深临床稽查经理。
 
 # 用户要求
 {user_prompt}
@@ -84,7 +91,13 @@ def build_plangen_prompt(user_prompt: str, protocol_text: str = "", extra_contex
 # 方案或原始资料
 {protocol_text}
 
-# 企业知识库
+# 企业知识库文件
+{', '.join(kb_files)}
+
+# RAG召回知识片段
+{rag_context}
+
+# 企业完整知识库
 {kb_text}
 """.strip()
 
