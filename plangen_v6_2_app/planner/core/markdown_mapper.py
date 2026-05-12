@@ -3,8 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Tuple
 
-PROCESS_KEYS = ["随机化要求", "随机要求", "复筛要求", "终止治疗要求", "退出研究要求", "禁止合并治疗要求", "限制用药要求", "药物剂量调整规则", "剂量调整", "关键时间窗要求"]
-DIRTY_KEYWORDS = ["质控范围", "质控分工", "序号 |", "研究者文件夹", "受试者文件夹", "安全性信息的收集", "临床试验质量管理体系", "供应商管理", "受试者知情同意过程及文件", "受试者筛选、入组", "临床试验数据记录、报告及溯源", "中心稽查风险评估病历抽取原则", "发生major PD", "全部SAE", "首例、末例", "同日签署知情同意", "进展事件多发", "HIS/LIS/PACS", "试验用药品管理、生物样本管理"]
+PROCESS_KEYS = ["随机化要求", "随机要求", "复筛要求", "终止治疗要求", "退出研究要求", "禁止合并治疗要求", "限制用药要求", "药物剂量调整规则", "剂量调整", "关键时间窗要求", "随机化程序"]
 PLACEHOLDERS = {"待填写", "xxxxx", "xxxxxx", "xxx", "[填写]", "其他", "请填写"}
 
 
@@ -27,19 +26,9 @@ def _strip_md(text: str) -> str:
     return text.strip(" |\t")
 
 
-def _is_dirty_line(text: str) -> bool:
+def _valid(text: str) -> bool:
     t = _strip_md(text)
-    if not t or t in PLACEHOLDERS:
-        return True
-    if re.fullmatch(r"[-| ]+", t):
-        return True
-    if re.match(r"^\d+\s*\|", t):
-        return True
-    if "|" in t and ("待填写" in t or "请填写" in t or "质控流程" in t or "计划时间" in t):
-        return True
-    if any(k in t for k in DIRTY_KEYWORDS):
-        return True
-    return False
+    return bool(t) and t not in PLACEHOLDERS and not re.fullmatch(r"[-| ]+", t)
 
 
 def _extract_first(patterns: List[str], text: str, default: str = "") -> str:
@@ -47,7 +36,7 @@ def _extract_first(patterns: List[str], text: str, default: str = "") -> str:
         m = re.search(p, text, re.S | re.I)
         if m:
             val = _strip_md(m.group(1))
-            if val and val not in PLACEHOLDERS:
+            if _valid(val):
                 return val
     return default
 
@@ -67,7 +56,9 @@ def _parse_md_tables(md: str) -> List[List[List[str]]]:
         rows = []
         for b in block:
             raw = b.strip()
-            if not raw.startswith("|"):
+            if not raw.startswith("|") and raw.count("|") >= 1:
+                raw = "|" + raw + "|"
+            if "|" not in raw:
                 continue
             cells = [_strip_md(c) for c in raw.strip("|").split("|")]
             if cells and not all(re.fullmatch(r":?-{2,}:?", c.replace(" ", "")) for c in cells):
@@ -86,40 +77,31 @@ def _table_rows_by_headers(md: str, header_keywords: List[str]) -> List[List[str
     return out
 
 
-def _heading_match(line: str, keys: List[str]) -> bool:
-    plain = _strip_md(line)
-    return any(k in plain for k in keys)
-
-
 def _section(md: str, start_keys: List[str], stop_keys: List[str] | None = None) -> str:
     lines = md.splitlines()
     start = None
+    prefix = ""
     for i, line in enumerate(lines):
-        if _heading_match(line, start_keys):
+        plain = _strip_md(line)
+        if any(k in plain for k in start_keys):
             start = i + 1
+            if "：" in plain or ":" in plain:
+                parts = re.split(r"[:：]", plain, maxsplit=1)
+                if len(parts) > 1 and _valid(parts[1]):
+                    prefix = parts[1].strip()
             break
     if start is None:
         return ""
     end = len(lines)
     for j in range(start, len(lines)):
-        plain = _strip_md(lines[j].strip())
+        plain = _strip_md(lines[j])
         if not plain:
             continue
         if stop_keys and any(k in plain for k in stop_keys):
             end = j
             break
-    return "\n".join(lines[start:end]).strip()
-
-
-def _section_lines(md: str, start_keys: List[str], stop_keys: List[str]) -> List[str]:
-    sec = _section(md, start_keys, stop_keys)
-    lines = []
-    for line in sec.splitlines():
-        plain = _strip_md(line)
-        if plain.startswith("|") or _is_dirty_line(plain):
-            continue
-        lines.append(plain)
-    return lines
+    body = "\n".join(lines[start:end]).strip()
+    return (prefix + "\n" + body).strip() if prefix else body
 
 
 def _find_label_value(md: str, labels: List[str]) -> str:
@@ -129,7 +111,7 @@ def _find_label_value(md: str, labels: List[str]) -> str:
                 left = row[0].replace("：", "").replace(":", "").strip()
                 if any(lab in left for lab in labels):
                     val = _strip_md(row[1])
-                    if val not in PLACEHOLDERS:
+                    if _valid(val):
                         return val
     for lab in labels:
         v = _extract_first([rf"{re.escape(lab)}[:：]\s*([^\n]+)"], md)
@@ -139,13 +121,13 @@ def _find_label_value(md: str, labels: List[str]) -> str:
 
 
 def _extract_title(md: str) -> str:
-    project = _extract_first([r"###\s*1\.1\s*项目名称[:：]?\s*\n([^#]+?)\n\s*###", r"1\.1\s*项目名称[:：]?\s*\n([^#]+?)\n\s*1\.2", r"项目名称[:：]\s*([^\n]+)"], md)
+    project = _extract_first([r"项目名称[:：]\s*([^\n]+)", r"1\.1\s*项目名称[:：]?\s*\n([^#\n]+)"], md)
     if project:
         return project
     for line in [l.strip() for l in md.splitlines() if l.strip()][:30]:
-        if line.startswith("#") and "模式" not in line and "摘要" not in line:
+        if line.startswith("#") and "摘要" not in line and "模式" not in line:
             title = _strip_md(line)
-            if title not in PLACEHOLDERS:
+            if _valid(title):
                 return re.sub(r"中心(稽查|质控)计划$", "", title).strip()
     return "待补充项目名称"
 
@@ -155,18 +137,32 @@ def _version_parts(v: str) -> Tuple[str, str]:
     if "/" in v:
         a, b = v.split("/", 1)
         return a.strip() or "V1.0", b.strip()
-    m = re.search(r"(V\d+(?:\.\d+)*)\s*[/ ]?\s*([0-9]{4}年[0-9]{1,2}月[0-9]{1,2}日)?", v, re.I)
-    if m:
-        return (m.group(1) or "V1.0"), (m.group(2) or "")
     return v or "V1.0", ""
 
 
 def _extract_protocol_code(md: str) -> str:
-    return _extract_first([r"方案编号[:：]\s*([A-Za-z0-9\-]+)", r"（方案编号[:：]\s*([A-Za-z0-9\-]+)）", r"\(([A-Z]{2,}[A-Z0-9\-]{3,})\)"], md)
+    return _extract_first([r"方案编号[:：]\s*([A-Za-z0-9\-]+)", r"\(([A-Z]{2,}[A-Z0-9\-]{3,})\)"], md)
 
 
 def _is_process(text: str) -> bool:
     return any(k in text for k in PROCESS_KEYS)
+
+
+def _make_focus_from_criterion(text: str) -> str:
+    checks = []
+    if any(k in text for k in ["年龄", "岁"]):
+        checks.append("核对身份证/病历/ICF签署日期，确认年龄范围符合方案要求")
+    if any(k in text for k in ["知情同意", "ICF"]):
+        checks.append("核对ICF版本、签署日期、签署人及筛选程序前完成情况")
+    if any(k in text for k in ["实验室", "血", "尿", "肌酐", "ALT", "AST", "胆红素", "血小板", "血红蛋白", "纤维蛋白原"]):
+        checks.append("核对实验室报告、采样时间窗、单位换算及EDC/源数据一致性")
+    if any(k in text for k in ["用药", "药物", "华法林", "阿司匹林", "肝素"]):
+        checks.append("核对医嘱、合并用药记录及禁止/限制用药时间窗")
+    if any(k in text for k in ["妊娠", "哺乳", "避孕"]):
+        checks.append("核对妊娠检测、避孕告知/承诺及随访记录")
+    if not checks:
+        checks.append("核对源文件、研究者判断依据、时间窗及EDC/源数据一致性")
+    return "；".join(checks)
 
 
 def _extract_criteria_rows(md: str) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], List[Dict[str, str]]]:
@@ -175,22 +171,84 @@ def _extract_criteria_rows(md: str) -> Tuple[List[Dict[str, str]], List[Dict[str
     for row in rows:
         left = _strip_md(row[0])
         right = _strip_md(row[1]) if len(row) > 1 else ""
-        if not left or left in ["方案", "待补充", "请填写"]:
+        if not _valid(left) or left in ["方案", "待补充", "请填写"]:
             continue
         if _is_process(left):
             process.append({"requirement": left, "focus": right})
-        elif left.startswith("排除标准") or "排除标准" in left[:10]:
-            exclusions.append({"criterion": left, "ai_focus": right})
-        elif left.startswith("入选标准") or "入选标准" in left[:10]:
-            criteria.append({"criterion": left, "ai_focus": right})
+        elif left.startswith("排除标准") or "排除标准" in left[:12]:
+            exclusions.append({"criterion": left, "ai_focus": right or _make_focus_from_criterion(left)})
+        elif left.startswith("入选标准") or "入选标准" in left[:12]:
+            criteria.append({"criterion": left, "ai_focus": right or _make_focus_from_criterion(left)})
         else:
-            criteria.append({"criterion": left, "ai_focus": right})
+            criteria.append({"criterion": left, "ai_focus": right or _make_focus_from_criterion(left)})
+
+    # 兜底：钉钉未输出表格时，从“入选标准/排除标准”文本块逐条抽取
+    if not criteria and not exclusions:
+        incl = _section(md, ["入选标准", "纳入标准"], ["排除标准", "随机化", "随机", "研究目的", "研究终点", "2.5.3.3"])
+        excl = _section(md, ["排除标准"], ["随机化", "随机", "研究目的", "研究终点", "2.5.3.3", "2.5.4"])
+        for line in incl.splitlines():
+            t = _strip_md(line)
+            if _valid(t) and (re.match(r"^\d+", t) or "入选" in t):
+                item = t if t.startswith("入选标准") else f"入选标准：{t}"
+                criteria.append({"criterion": item, "ai_focus": _make_focus_from_criterion(item)})
+        for line in excl.splitlines():
+            t = _strip_md(line)
+            if _valid(t) and (re.match(r"^\d+", t) or "排除" in t):
+                item = t if t.startswith("排除标准") else f"排除标准：{t}"
+                exclusions.append({"criterion": item, "ai_focus": _make_focus_from_criterion(item)})
     return criteria, exclusions, process
 
 
-def _extract_assignment_rows(md: str) -> List[Dict[str, str]]:
-    rows = _table_rows_by_headers(md, ["序号", "质控流程"])
-    return [{"seq": r[0], "process": r[1], "assignee": r[2] if len(r) > 2 else "", "plan_time": r[3] if len(r) > 3 else ""} for r in rows if r and r[0] != "序号"]
+def _extract_endpoint_rows(md: str) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+    rows = _table_rows_by_headers(md, ["目的", "终点"])
+    primary, secondary = [], []
+    for r in rows:
+        if len(r) < 2 or not _valid(r[0]) or not _valid(r[1]):
+            continue
+        item = {"objective": r[0], "endpoint": r[1]}
+        if "主要" in r[0] or "主要" in r[1]:
+            primary.append(item)
+        else:
+            secondary.append(item)
+    if not primary and not secondary:
+        sec = _section(md, ["研究目的和终点", "研究目的", "研究终点", "主要目的", "主要终点"], ["安全性信息", "2.5.3.4", "2.5.4", "临床试验用药品"])
+        objective = _extract_first([r"主要目的[:：]?\s*([^\n]+)", r"目的[:：]?\s*([^\n]+)"], sec)
+        endpoint = _extract_first([r"主要终点[:：]?\s*([^\n]+)"], sec)
+        if objective or endpoint:
+            primary.append({"objective": objective or "主要目的", "endpoint": endpoint or "主要终点待确认"})
+        for line in sec.splitlines():
+            t = _strip_md(line)
+            if _valid(t) and "次要终点" in t:
+                secondary.append({"objective": "次要目的", "endpoint": t})
+    return primary, secondary
+
+
+def _extract_imp_spec_and_points(md: str) -> Tuple[str, str]:
+    section = _section(md, ["2.5.4", "临床试验用药品管理"], ["2.5.5", "生物样本管理", "2.5.6", "三、"])
+    spec = _extract_first([r"试验药物规格[^\n]*[:：]\s*([^\n]+)", r"规格[^\n]*[:：]\s*([^\n]+)"], section)
+    return spec, ""
+
+
+def _extract_summary(md: str) -> str:
+    sec = _section(md, ["摘要总结"], ["一、", "项目简介"])
+    lines = [_strip_md(x) for x in sec.splitlines() if _valid(x)]
+    return "\n".join(lines[:18])
+
+
+def _extract_sampling_principle(md: str) -> str:
+    sec = _section(md, ["中心稽查风险评估病历抽取原则", "中心质控风险评估病历抽取原则", "抽取原则"], ["中心筛选情况", "2.5.1", "2.5.2", "2.5.3", "受试者筛选", "三、"])
+    lines = []
+    for line in sec.splitlines():
+        plain = _strip_md(line)
+        if _valid(plain) and "抽取原则" not in plain:
+            lines.append(plain)
+    return "\n".join(lines[:12])
+
+
+def _extract_law_supplement(md: str) -> str:
+    sec = _section(md, ["2.6", "法规依据补充说明"], ["三、", "3.1", "质控流程"])
+    lines = [_strip_md(x) for x in sec.splitlines() if _valid(x) and "2.6" not in _strip_md(x)]
+    return "\n".join(lines[:12]) or "本项目质控应结合现行GCP、临床试验方案、研究者手册、伦理批准文件及相关指导原则进行综合判断，确保受试者权益、安全保护及数据真实、准确、完整、可溯源。"
 
 
 def _extract_risk_rows(md: str) -> List[Dict[str, str]]:
@@ -203,72 +261,9 @@ def _extract_subject_rows(md: str) -> List[Dict[str, str]]:
     return [{"subject_id": r[0], "summary": r[1] if len(r) > 1 else ""} for r in rows if r and r[0] != "筛选号"]
 
 
-def _extract_endpoint_rows(md: str) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
-    rows = _table_rows_by_headers(md, ["目的", "终点"])
-    primary, secondary = [], []
-    for r in rows:
-        if len(r) < 2:
-            continue
-        if r[0] in PLACEHOLDERS or r[1] in PLACEHOLDERS:
-            continue
-        item = {"objective": r[0], "endpoint": r[1]}
-        if "主要" in r[0] or "主要" in r[1]:
-            primary.append(item)
-        else:
-            secondary.append(item)
-    return primary, secondary
-
-
-def _extract_imp_spec_and_points(md: str) -> Tuple[str, str]:
-    section = _section(md, ["2.5.4", "临床试验用药品管理"], ["2.5.5", "生物样本管理", "2.5.6", "三、"])
-    rows = _table_rows_by_headers(section, ["试验药物规格"])
-    spec = rows[0][0] if rows and rows[0][0] not in PLACEHOLDERS else ""
-    lines = []
-    for plain in _section_lines(md, ["2.5.4", "临床试验用药品管理"], ["2.5.5", "生物样本管理", "2.5.6", "三、"]):
-        if "试验药物规格" in plain or plain == spec or "规格：" in plain:
-            if not spec and "规格：" in plain:
-                spec = plain
-            continue
-        lines.append(plain)
-    return spec, "\n".join(lines[:10])
-
-
-def _extract_summary(md: str) -> str:
-    sec = _section(md, ["摘要总结"], ["一、", "项目简介"])
-    lines = []
-    for line in sec.splitlines():
-        plain = _strip_md(line)
-        if plain and plain not in PLACEHOLDERS and not plain.startswith("|") and not re.fullmatch(r"[-| ]+", plain):
-            lines.append(plain)
-    return "\n".join(lines[:18])
-
-
-def _extract_law_supplement(md: str) -> str:
-    candidates = [
-        _section(md, ["2.6", "法规依据补充说明"], ["三、", "3.1", "质控流程"]),
-        _section(md, ["法规依据补充说明"], ["三、", "3.1", "质控流程"]),
-        _section(md, ["法规依据", "补充说明"], ["三、", "3.1", "质控流程"]),
-    ]
-    for sec in candidates:
-        lines = []
-        for line in sec.splitlines():
-            plain = _strip_md(line)
-            if plain and plain not in PLACEHOLDERS and "2.6" not in plain:
-                lines.append(plain)
-        if lines:
-            return "\n".join(lines[:12])
-    # 兜底：如果钉钉没有单独输出2.6，则根据法规依据生成补充说明
-    return "本项目质控应结合现行GCP、临床试验方案、研究者手册、伦理批准文件及相关指导原则进行综合判断；如方案要求与法规或伦理批件存在不一致，应优先核查差异来源、审批依据、执行记录及申办方/研究者的书面确认，确保受试者权益、安全保护及数据真实、准确、完整、可溯源。"
-
-
-def _extract_sampling_principle(md: str) -> str:
-    sec = _section(md, ["中心稽查风险评估病历抽取原则", "中心质控风险评估病历抽取原则", "抽取原则"], ["2.5.1", "2.5.2", "2.5.3", "受试者筛选", "三、"])
-    lines = []
-    for line in sec.splitlines():
-        plain = _strip_md(line)
-        if plain and plain not in PLACEHOLDERS and "中心稽查风险评估" not in plain and "抽取原则" not in plain:
-            lines.append(plain)
-    return "\n".join(lines[:10])
+def _extract_assignment_rows(md: str) -> List[Dict[str, str]]:
+    rows = _table_rows_by_headers(md, ["序号", "质控流程"])
+    return [{"seq": r[0], "process": r[1], "assignee": r[2] if len(r) > 2 else "", "plan_time": r[3] if len(r) > 3 else ""} for r in rows if r and r[0] != "序号"]
 
 
 def parse_markdown_to_template_data(md_text: str) -> Dict[str, Any]:
@@ -282,16 +277,11 @@ def parse_markdown_to_template_data(md_text: str) -> Dict[str, Any]:
         author, approver = [x.strip() for x in author_approver.split("/", 1)]
     else:
         author, approver = author_approver or "苗田", "待审批"
-
-    audit_type = _extract_first([r"###\s*1\.2\s*质控类型[:：]?\s*\n([^#]+?)\n\s*###", r"1\.2\s*质控类型[:：]?\s*\n([^#]+?)\n\s*1\.3", r"质控类型[:：]\s*([^\n]+)"], md, "中心常规质控")
-    sponsor2 = _extract_first([r"###\s*1\.3\s*申办方[:：]?\s*\n([^#]+?)\n\s*###", r"1\.3\s*申办方[:：]?\s*\n([^#]+?)\n\s*1\.4", r"申办方[:：]\s*([^\n|]+)"], md, sponsor)
-    sponsor = _strip_md(sponsor2) or sponsor
-
+    audit_type = _extract_first([r"1\.2\s*质控类型[:：]?\s*\n([^#\n]+)", r"质控类型[:：]\s*([^\n]+)"], md, "中心常规质控")
     criteria, exclusions, process = _extract_criteria_rows(md)
     primary, secondary = _extract_endpoint_rows(md)
     imp_spec, imp_points = _extract_imp_spec_and_points(md)
     sampling = _extract_sampling_principle(md)
-
     return {
         "AUTHOR": author,
         "APPROVER": approver,
@@ -309,7 +299,6 @@ def parse_markdown_to_template_data(md_text: str) -> Dict[str, Any]:
         "RISK_SAMPLING_RULE": sampling,
         "LAW_SUPPLEMENT": _extract_law_supplement(md),
         "project": {"name": project_name, "sponsor": sponsor, "protocol_code": _extract_protocol_code(md), "version_no": version_no, "version_date": version_date, "audit_type": audit_type},
-        "protocol_analysis": {"study_design": _extract_first([r"本临床试验为(.+?)(?:。|\n)", r"研究设计[:：]\s*([^\n]+)"], md, ""), "primary_endpoint": primary[0]["endpoint"] if primary else "", "key_criteria": "；".join([x["criterion"] for x in criteria[:4] + exclusions[:4]])},
         "criteria_ai_rows": criteria,
         "exclusion_ai_rows": exclusions,
         "process_requirement_rows": process,
@@ -319,9 +308,5 @@ def parse_markdown_to_template_data(md_text: str) -> Dict[str, Any]:
         "subject_rows": _extract_subject_rows(md),
         "assignment_rows": _extract_assignment_rows(md),
         "report_send_rows": [{"name": "待填写", "email": "待填写", "title_company": "待填写"}],
-        "ai_audit_key_points": "\n".join([f"{i+1}. {r['criterion']}：{r['ai_focus']}" for i, r in enumerate(criteria[:5] + exclusions[:5])]),
-        "rbqm_strategy": "",
-        "interview_questions": "",
-        "finding_capa_draft": "",
         "defect_rows": [],
     }
