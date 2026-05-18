@@ -1,1 +1,1 @@
-renderer mapping fix: use exact labels only; replace template placeholders before filling dynamic tables; remove placeholder rows after dynamic table replacement.
+renderer mapping fix v2: exact cover labels, no fuzzy sponsor match, clear placeholder rows.
