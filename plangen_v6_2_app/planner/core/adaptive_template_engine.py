@@ -7,8 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Pt
-from docx.oxml import OxmlElement
+from docx.shared import Pt, Inches
 from docx.oxml.ns import qn
 
 KEEP_MARKS = ["保持以下文字不变", "以下文字不变", "固定内容", "不需填写", "无需填写"]
@@ -302,11 +301,18 @@ def _style_table_font(table) -> None:
 
 
 def _insert_table_after_paragraph(paragraph, rows: int, cols: int):
-    tbl = OxmlElement("w:tbl")
-    paragraph._p.addnext(tbl)
-    table = paragraph._parent.add_table(rows=rows, cols=cols)
-    tbl.addnext(table._tbl)
-    tbl.getparent().remove(tbl)
+    """Insert a table after a heading paragraph.
+
+    python-docx 1.1+/1.2 BlockItemContainer.add_table requires a width when
+    the parent is a document body or table cell. Older versions may not accept
+    the width keyword, so keep a fallback for compatibility.
+    """
+    parent = paragraph._parent
+    try:
+        table = parent.add_table(rows=rows, cols=cols, width=Inches(6.5))
+    except TypeError:
+        table = parent.add_table(rows=rows, cols=cols)
+    paragraph._p.addnext(table._tbl)
     return table
 
 
