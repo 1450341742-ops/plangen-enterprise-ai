@@ -160,14 +160,43 @@ def _parse_markdown_table_rows(text: str, expected_headers: List[str]) -> List[L
     return parsed
 
 
-def _is_criteria_requirement(text: str) -> bool:
-    criteria_keywords = [
-        "知情同意", "签署", "年龄", "岁", "入选", "排除", "确诊", "病理", "细胞学", "肿瘤组织",
-        "ECOG", "可测量", "RECIST", "实验室", "器官功能", "感染", "心脑血管", "自身免疫",
-        "CNS", "转移", "既往", "治疗失败", "治疗后", "受试者", "妊娠", "避孕",
+def _is_process_requirement(text: str) -> bool:
+    text = text or ""
+    process_keywords = [
+        "随机化", "随机程序", "随机", "IWRS", "IRT", "分配", "设盲", "盲态", "揭盲",
+        "给药", "输注", "用药", "剂量", "递增", "导入期", "D-", "D1", "D2", "D3", "D4", "D5", "D6",
+        "监测", "记录", "尿量", "入水量", "液体净平衡", "NT-proBNP", "Copeptin", "心电图", "生命体征",
+        "PK", "PD", "样本", "采血", "检测", "AE", "SAE", "DLT", "访视", "时间窗",
+        "终止", "停药", "退出", "失访", "死亡", "随访", "禁止", "合并用药", "背景利尿",
     ]
-    process_keywords = ["剂量", "DLT", "AE", "SAE", "给药", "预处理", "随机", "IRC", "PK", "免疫原性", "细胞因子", "样本", "访视", "时间窗"]
-    return any(k in text for k in criteria_keywords) and not (any(k in text for k in process_keywords) and not any(k in text for k in ["既往", "排除", "实验室", "样本"]))
+    return any(k in text for k in process_keywords)
+
+
+def _is_criteria_requirement(text: str) -> bool:
+    text = text or ""
+    if text.startswith("入选标准") or text.startswith("排除标准") or "入选标准" in text[:12] or "排除标准" in text[:12]:
+        return True
+    if _is_process_requirement(text):
+        return False
+    criteria_keywords = [
+        "知情同意", "签署", "年龄", "岁", "入选", "排除", "确诊", "诊断", "病理", "细胞学", "筛选",
+        "ECOG", "NYHA", "可测量", "RECIST", "实验室", "器官功能", "肝功能", "肾功能",
+        "感染", "病史", "既往", "治疗失败", "治疗史", "受试者", "妊娠", "避孕",
+    ]
+    return any(k in text for k in criteria_keywords)
+
+
+def _dedupe_table_rows(rows: List[Dict[str, Any]], table_type: str) -> List[Dict[str, Any]]:
+    seen = set()
+    out: List[Dict[str, Any]] = []
+    for item in rows:
+        vals = tuple(_values_for_type(item, table_type))
+        key = tuple(v.strip() for v in vals if str(v).strip())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 
 def _fallback_rows_from_markdown(data: Dict[str, Any], table_type: str) -> List[Dict[str, Any]]:
@@ -180,9 +209,10 @@ def _fallback_rows_from_markdown(data: Dict[str, Any], table_type: str) -> List[
                 if not left or not right:
                     continue
                 target_is_criteria = _is_criteria_requirement(left)
+                target_is_process = _is_process_requirement(left) or not target_is_criteria
                 if table_type == "criteria" and target_is_criteria:
                     rows.append({"criterion": left, "ai_focus": right})
-                elif table_type == "process" and not target_is_criteria:
+                elif table_type == "process" and target_is_process:
                     rows.append({"requirement": left, "focus": right})
         elif table_type == "endpoint":
             section = _extract_named_section(text, ["研究目的和终点", "研究目的与终点"])
@@ -293,7 +323,10 @@ def _rows_for_type(data: Dict[str, Any], table_type: str) -> List[Dict[str, Any]
         rows = list(data.get("law_supplement_rows", []) or data.get("LAW_SUPPLEMENT_ROWS", []) or [])
     else:
         rows = []
-    return rows or _fallback_rows_from_markdown(data, table_type)
+    fallback = _fallback_rows_from_markdown(data, table_type)
+    if table_type in {"criteria", "process", "endpoint", "law"}:
+        return _dedupe_table_rows(rows + fallback, table_type)
+    return rows or fallback
 
 
 def _values_for_type(item: Dict[str, Any], table_type: str) -> List[str]:
