@@ -35,6 +35,8 @@ if source_text.strip():
     if st.button("生成并下载中心质控计划", type="primary"):
         try:
             data = parse_markdown_to_template_data(source_text)
+            # 保留原始 Markdown，供模板引擎在结构化字段漏解析时进行兜底表格映射。
+            data["RAW_MARKDOWN"] = source_text
             data = enrich_template_context(data)
 
             if project_name_override.strip():
