@@ -86,6 +86,8 @@ def _clean_generated_text(text: Any) -> str:
         t = line.strip()
         if not t or t in EMPTY_BULLETS:
             continue
+        if "{{" in t or "}}" in t or t in {"请填写", "待填写", "xxxxx", "XXXX"}:
+            continue
         if re.fullmatch(r"[·•■▪\-—_\s]+", t):
             continue
         out.append(t)
@@ -255,6 +257,19 @@ def _clear_empty_bullet_paragraphs(doc: Document) -> None:
                             r.text = ""
 
 
+def _clear_remaining_placeholders(doc: Document) -> None:
+    for p in doc.paragraphs:
+        if _has_placeholder(p.text):
+            _set_para_text(p, "")
+    for table in doc.tables:
+        if _is_safety_keep_table(table):
+            continue
+        for row in table.rows:
+            for cell in row.cells:
+                if _has_placeholder(cell.text):
+                    _set_cell_text(cell, "")
+
+
 def _fill_field_cells_by_left_label(doc: Document, data: Dict[str, Any]) -> None:
     for table in doc.tables:
         if _is_safety_keep_table(table):
@@ -324,11 +339,12 @@ def _find_law_heading_paragraph(doc: Document):
 
 
 def _clear_law_plain_paragraphs(doc: Document) -> None:
-    """If old output wrote law entries as plain text under 2.6, clear them before inserting table."""
+    """After law table rendering, remove duplicated plain-text law lines under 2.6."""
     heading = _find_law_heading_paragraph(doc)
     if heading is None:
         return
     found = False
+    law_keywords = ["药物临床试验质量管理规范", "ICH E6", "伦理委员会", "研究者应当", "申办者为评估", "设盲", "质量保证", "必备文件", "稽查计划制定", "知情同意", "随机化管理", "盲态保持", "数据真实性", "入排标准"]
     for p in doc.paragraphs:
         if p is heading:
             found = True
@@ -338,7 +354,9 @@ def _clear_law_plain_paragraphs(doc: Document) -> None:
         text = p.text.strip()
         if re.match(r"^(三、|3\.1|三\s)", text):
             break
-        if "｜" in text or "|" in text or "药物临床试验质量管理规范" in text or "ICH E6" in text:
+        if not text:
+            continue
+        if "｜" in text or "|" in text or any(k in text for k in law_keywords):
             _set_para_text(p, "")
 
 
@@ -351,11 +369,11 @@ def _ensure_law_table(doc: Document, data: Dict[str, Any]) -> None:
     for table in doc.tables:
         if _infer_table_type(table) == "law":
             _fill_dynamic_table(table, rows, "law")
+            _clear_law_plain_paragraphs(doc)
             return
     heading = _find_law_heading_paragraph(doc)
     if heading is None:
         return
-    _clear_law_plain_paragraphs(doc)
     table = _insert_table_after_paragraph(heading, 2, len(headers))
     try:
         table.style = "Table Grid"
@@ -368,6 +386,7 @@ def _ensure_law_table(doc: Document, data: Dict[str, Any]) -> None:
                 run.font.bold = True
     _fill_dynamic_table(table, rows, "law")
     _style_table_font(table)
+    _clear_law_plain_paragraphs(doc)
 
 
 def adaptive_map_template(template_path: str | Path, data: Dict[str, Any], output_path: str | Path) -> Path:
@@ -426,6 +445,8 @@ def adaptive_map_template(template_path: str | Path, data: Dict[str, Any], outpu
     _fill_field_cells_by_left_label(doc, data)
     _force_fill_sampling(doc, data)
     _force_keep_safety_template(doc)
+    _clear_remaining_placeholders(doc)
+    _clear_law_plain_paragraphs(doc)
     _clear_empty_bullet_paragraphs(doc)
     _remove_empty_rows_in_tables(doc)
     output_path = Path(output_path)
