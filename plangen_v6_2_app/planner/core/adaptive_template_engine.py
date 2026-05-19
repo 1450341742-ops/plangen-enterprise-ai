@@ -41,8 +41,8 @@ FIELD_ALIASES = {
 }
 
 TABLE_TYPES = {
-    "criteria": ["方案", "重点关注"],
     "process": ["方案描述", "重点关注"],
+    "criteria": ["方案", "重点关注"],
     "endpoint": ["主要目的", "主要终点"],
     "risk": ["数据风险因素", "详细信息"],
     "subject": ["筛选号", "基本情况"],
@@ -94,6 +94,117 @@ def _clean_generated_text(text: Any) -> str:
     return "\n".join(out)
 
 
+def _strip_cell_marker(text: Any) -> str:
+    text = _clean_generated_text(text)
+    text = re.sub(r"^\s*(?:[一二三四五六七八九十]+、|\d+[\.、])\s*", "", text)
+    text = re.sub(r"^\s*[■▪•·\-—]+\s*", "", text)
+    return text.strip()
+
+
+def _iter_text_candidates(data: Any) -> List[str]:
+    texts: List[str] = []
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, str):
+            if "|" in obj or "受试者筛选入组" in obj or "研究目的" in obj or "法规依据" in obj:
+                texts.append(obj)
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                walk(v)
+
+    walk(data)
+    seen = set()
+    unique = []
+    for t in texts:
+        if t not in seen:
+            unique.append(t)
+            seen.add(t)
+    return unique
+
+
+def _extract_named_section(text: str, names: List[str]) -> str:
+    if not text:
+        return ""
+    starts = []
+    for name in names:
+        for m in re.finditer(re.escape(name), text):
+            starts.append(m.start())
+    if not starts:
+        return ""
+    start = min(starts)
+    rest = text[start:]
+    next_heading = re.search(r"\n\s*(?:[一二三四五六七八九十]+、|\d+[\.、])\s*(?!.*(?:" + "|".join(re.escape(n) for n in names) + r"))", rest[1:])
+    if next_heading:
+        return rest[: next_heading.start() + 1]
+    return rest
+
+
+def _parse_markdown_table_rows(text: str, expected_headers: List[str]) -> List[List[str]]:
+    lines = [ln.strip() for ln in (text or "").splitlines() if "|" in ln]
+    parsed: List[List[str]] = []
+    header_seen = False
+    for ln in lines:
+        if re.fullmatch(r"\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?", ln):
+            continue
+        cells = [_strip_cell_marker(c) for c in ln.strip().strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        if not header_seen and all(any(h in c for c in cells) for h in expected_headers):
+            header_seen = True
+            continue
+        if header_seen and any(cells):
+            parsed.append(cells)
+    return parsed
+
+
+def _is_criteria_requirement(text: str) -> bool:
+    criteria_keywords = [
+        "知情同意", "签署", "年龄", "岁", "入选", "排除", "确诊", "病理", "细胞学", "肿瘤组织",
+        "ECOG", "可测量", "RECIST", "实验室", "器官功能", "感染", "心脑血管", "自身免疫",
+        "CNS", "转移", "既往", "治疗失败", "治疗后", "受试者", "妊娠", "避孕",
+    ]
+    process_keywords = ["剂量", "DLT", "AE", "SAE", "给药", "预处理", "随机", "IRC", "PK", "免疫原性", "细胞因子", "样本", "访视", "时间窗"]
+    return any(k in text for k in criteria_keywords) and not (any(k in text for k in process_keywords) and not any(k in text for k in ["既往", "排除", "实验室", "样本"]))
+
+
+def _fallback_rows_from_markdown(data: Dict[str, Any], table_type: str) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for text in _iter_text_candidates(data):
+        if table_type in {"criteria", "process"}:
+            section = _extract_named_section(text, ["受试者筛选入组及方案执行"])
+            for cells in _parse_markdown_table_rows(section or text, ["方案", "重点关注"]):
+                left, right = cells[0], cells[1]
+                if not left or not right:
+                    continue
+                target_is_criteria = _is_criteria_requirement(left)
+                if table_type == "criteria" and target_is_criteria:
+                    rows.append({"criterion": left, "ai_focus": right})
+                elif table_type == "process" and not target_is_criteria:
+                    rows.append({"requirement": left, "focus": right})
+        elif table_type == "endpoint":
+            section = _extract_named_section(text, ["研究目的和终点", "研究目的与终点"])
+            for cells in _parse_markdown_table_rows(section or text, ["研究目的", "研究终点"]):
+                if len(cells) >= 2 and cells[0] and cells[1]:
+                    rows.append({"objective": cells[0], "endpoint": cells[1]})
+        elif table_type == "law":
+            section = _extract_named_section(text, ["法规依据补充说明", "法规依据"])
+            for cells in _parse_markdown_table_rows(section or text, ["法规", "条款"]):
+                if len(cells) >= 3:
+                    rows.append({
+                        "regulation": cells[0],
+                        "article": cells[1] if len(cells) > 1 else "",
+                        "original_text": cells[2] if len(cells) > 2 else "",
+                        "topic": cells[3] if len(cells) > 3 else "",
+                        "applicability": cells[4] if len(cells) > 4 else "",
+                    })
+        if rows:
+            break
+    return rows
+
+
 def _set_run_style_like(run, size: Optional[Pt] = None, bold: Optional[bool] = None) -> None:
     run.font.name = run.font.name or "宋体"
     run._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
@@ -143,13 +254,18 @@ def _is_safety_keep_table(table) -> bool:
 
 def _infer_table_type(table) -> str:
     text = _table_text(table)
+    compact = re.sub(r"\s+", "", text)
     if _is_safety_keep_table(table) or _is_keep_text(text):
         return "keep"
     if "随机化程序-方案描述" in text or "随机化程序-重点关注" in text:
         return "process"
-    if "主要目的" in text and ("主要终点" in text or "次要终点" in text):
+    if "方案描述" in compact and "重点关注" in compact:
+        return "process"
+    if ("研究目的" in compact and "研究终点" in compact) or ("主要目的" in compact and ("主要终点" in compact or "次要终点" in compact)):
         return "endpoint"
     if "入选/排除标准" in text:
+        return "criteria"
+    if "方案" in compact and "重点关注" in compact:
         return "criteria"
     for name, headers in TABLE_TYPES.items():
         if all(h in text for h in headers):
@@ -164,25 +280,27 @@ def _clone_row(table, idx: int):
 
 def _rows_for_type(data: Dict[str, Any], table_type: str) -> List[Dict[str, Any]]:
     if table_type == "criteria":
-        return list(data.get("criteria_ai_rows", []) or []) + list(data.get("exclusion_ai_rows", []) or [])
-    if table_type == "process":
-        return list(data.get("process_requirement_rows", []) or [])
-    if table_type == "endpoint":
-        return list(data.get("primary_endpoint_rows", []) or []) + list(data.get("secondary_endpoint_rows", []) or [])
-    if table_type == "risk":
-        return list(data.get("risk_analysis_rows", []) or [])
-    if table_type == "subject":
-        return list(data.get("subject_rows", []) or [])
-    if table_type == "law":
-        return list(data.get("law_supplement_rows", []) or data.get("LAW_SUPPLEMENT_ROWS", []) or [])
-    return []
+        rows = list(data.get("criteria_ai_rows", []) or []) + list(data.get("exclusion_ai_rows", []) or [])
+    elif table_type == "process":
+        rows = list(data.get("process_requirement_rows", []) or [])
+    elif table_type == "endpoint":
+        rows = list(data.get("primary_endpoint_rows", []) or []) + list(data.get("secondary_endpoint_rows", []) or [])
+    elif table_type == "risk":
+        rows = list(data.get("risk_analysis_rows", []) or [])
+    elif table_type == "subject":
+        rows = list(data.get("subject_rows", []) or [])
+    elif table_type == "law":
+        rows = list(data.get("law_supplement_rows", []) or data.get("LAW_SUPPLEMENT_ROWS", []) or [])
+    else:
+        rows = []
+    return rows or _fallback_rows_from_markdown(data, table_type)
 
 
 def _values_for_type(item: Dict[str, Any], table_type: str) -> List[str]:
     if table_type == "criteria":
-        return [item.get("criterion", ""), item.get("ai_focus", "")]
+        return [item.get("criterion", item.get("requirement", "")), item.get("ai_focus", item.get("focus", ""))]
     if table_type == "process":
-        return [item.get("requirement", ""), item.get("focus", "")]
+        return [item.get("requirement", item.get("criterion", "")), item.get("focus", item.get("ai_focus", ""))]
     if table_type == "endpoint":
         return [item.get("objective", item.get("purpose", "")), item.get("endpoint", "")]
     if table_type == "risk":
@@ -243,7 +361,6 @@ def _remove_empty_rows_in_tables(doc: Document) -> None:
 
 
 def _clear_empty_bullet_paragraphs(doc: Document) -> None:
-    # 不能彻底删除段落，只清空“只有符号”的run，避免影响模板结构。
     pattern = re.compile(r"^[\s\n\r·•■▪\-—_]+$")
     for p in doc.paragraphs:
         if pattern.fullmatch(p.text or ""):
@@ -297,7 +414,6 @@ def _force_fill_sampling(doc: Document, data: Dict[str, Any]) -> None:
 
 
 def _force_keep_safety_template(doc: Document) -> None:
-    # 防止历史错误生成内容污染安全性固定表：如左侧出现入选/排除标准，恢复为空，避免继续显示错映射。
     for table in doc.tables:
         if not _is_safety_keep_table(table):
             continue
@@ -317,12 +433,6 @@ def _style_table_font(table) -> None:
 
 
 def _insert_table_after_paragraph(paragraph, rows: int, cols: int):
-    """Insert a table after a heading paragraph.
-
-    python-docx 1.1+/1.2 BlockItemContainer.add_table requires a width when
-    the parent is a document body or table cell. Older versions may not accept
-    the width keyword, so keep a fallback for compatibility.
-    """
     parent = paragraph._parent
     try:
         table = parent.add_table(rows=rows, cols=cols, width=Inches(6.5))
@@ -340,7 +450,6 @@ def _find_law_heading_paragraph(doc: Document):
 
 
 def _clear_law_plain_paragraphs(doc: Document) -> None:
-    """After law table rendering, remove duplicated plain-text law lines under 2.6."""
     heading = _find_law_heading_paragraph(doc)
     if heading is None:
         return
@@ -362,11 +471,10 @@ def _clear_law_plain_paragraphs(doc: Document) -> None:
 
 
 def _ensure_law_table(doc: Document, data: Dict[str, Any]) -> None:
-    rows = list(data.get("law_supplement_rows", []) or data.get("LAW_SUPPLEMENT_ROWS", []) or [])
+    rows = _rows_for_type(data, "law")
     if not rows:
         return
     headers = ["法规/规范名称", "条款号/章节", "法规原文", "对应质控主题", "本项目适用说明"]
-    # Fill existing law table if a template table already exists.
     for table in doc.tables:
         if _infer_table_type(table) == "law":
             _fill_dynamic_table(table, rows, "law")
