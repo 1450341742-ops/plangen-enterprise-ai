@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 KEEP_MARKS = ["保持以下文字不变", "以下文字不变", "固定内容", "不需填写", "无需填写"]
@@ -46,6 +47,7 @@ TABLE_TYPES = {
     "endpoint": ["主要目的", "主要终点"],
     "risk": ["数据风险因素", "详细信息"],
     "subject": ["筛选号", "基本情况"],
+    "law": ["法规/规范名称", "条款号/章节"],
 }
 
 
@@ -170,6 +172,8 @@ def _rows_for_type(data: Dict[str, Any], table_type: str) -> List[Dict[str, Any]
         return list(data.get("risk_analysis_rows", []) or [])
     if table_type == "subject":
         return list(data.get("subject_rows", []) or [])
+    if table_type == "law":
+        return list(data.get("law_supplement_rows", []) or data.get("LAW_SUPPLEMENT_ROWS", []) or [])
     return []
 
 
@@ -184,6 +188,8 @@ def _values_for_type(item: Dict[str, Any], table_type: str) -> List[str]:
         return [item.get("risk_factor", ""), item.get("detail", "")]
     if table_type == "subject":
         return [item.get("subject_id", ""), item.get("summary", "")]
+    if table_type == "law":
+        return [item.get("regulation", ""), item.get("article", ""), item.get("original_text", ""), item.get("topic", ""), item.get("applicability", "")]
     return []
 
 
@@ -244,8 +250,7 @@ def _clear_empty_bullet_paragraphs(doc: Document) -> None:
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                paras = cell.paragraphs
-                for p in paras:
+                for p in cell.paragraphs:
                     if pattern.fullmatch(p.text or ""):
                         for r in p.runs:
                             r.text = ""
@@ -286,6 +291,77 @@ def _force_keep_safety_template(doc: Document) -> None:
             if left.startswith("入选标准") or left.startswith("排除标准"):
                 _set_cell_text(row.cells[0], "")
                 _set_cell_text(row.cells[1], "")
+
+
+def _style_table_font(table) -> None:
+    for row in table.rows:
+        for cell in row.cells:
+            for p in cell.paragraphs:
+                for run in p.runs:
+                    _set_run_style_like(run, run.font.size or Pt(10), run.font.bold)
+
+
+def _insert_table_after_paragraph(paragraph, rows: int, cols: int):
+    tbl = OxmlElement("w:tbl")
+    paragraph._p.addnext(tbl)
+    table = paragraph._parent.add_table(rows=rows, cols=cols)
+    tbl.addnext(table._tbl)
+    tbl.getparent().remove(tbl)
+    return table
+
+
+def _find_law_heading_paragraph(doc: Document):
+    for p in doc.paragraphs:
+        if "法规依据补充说明" in p.text:
+            return p
+    return None
+
+
+def _clear_law_plain_paragraphs(doc: Document) -> None:
+    """If old output wrote law entries as plain text under 2.6, clear them before inserting table."""
+    heading = _find_law_heading_paragraph(doc)
+    if heading is None:
+        return
+    found = False
+    for p in doc.paragraphs:
+        if p is heading:
+            found = True
+            continue
+        if not found:
+            continue
+        text = p.text.strip()
+        if re.match(r"^(三、|3\.1|三\s)", text):
+            break
+        if "｜" in text or "|" in text or "药物临床试验质量管理规范" in text or "ICH E6" in text:
+            _set_para_text(p, "")
+
+
+def _ensure_law_table(doc: Document, data: Dict[str, Any]) -> None:
+    rows = list(data.get("law_supplement_rows", []) or data.get("LAW_SUPPLEMENT_ROWS", []) or [])
+    if not rows:
+        return
+    headers = ["法规/规范名称", "条款号/章节", "法规原文", "对应质控主题", "本项目适用说明"]
+    # Fill existing law table if a template table already exists.
+    for table in doc.tables:
+        if _infer_table_type(table) == "law":
+            _fill_dynamic_table(table, rows, "law")
+            return
+    heading = _find_law_heading_paragraph(doc)
+    if heading is None:
+        return
+    _clear_law_plain_paragraphs(doc)
+    table = _insert_table_after_paragraph(heading, 2, len(headers))
+    try:
+        table.style = "Table Grid"
+    except Exception:
+        pass
+    for i, h in enumerate(headers):
+        _set_cell_text(table.rows[0].cells[i], h)
+        for p in table.rows[0].cells[i].paragraphs:
+            for run in p.runs:
+                run.font.bold = True
+    _fill_dynamic_table(table, rows, "law")
+    _style_table_font(table)
 
 
 def adaptive_map_template(template_path: str | Path, data: Dict[str, Any], output_path: str | Path) -> Path:
@@ -340,6 +416,7 @@ def adaptive_map_template(template_path: str | Path, data: Dict[str, Any], outpu
                 if value:
                     _set_cell_text(cell, value)
 
+    _ensure_law_table(doc, data)
     _fill_field_cells_by_left_label(doc, data)
     _force_fill_sampling(doc, data)
     _force_keep_safety_template(doc)
