@@ -225,7 +225,9 @@ def _find_cover_title_paragraph(doc: Document):
 
 
 def _cell_effective_text(cell) -> str:
-    return _clean_generated_text(cell.text)
+    text = _clean_generated_text(cell.text)
+    text = re.sub(r"[\s\n\r·•■▪\-—_]+", "", text)
+    return text.strip()
 
 
 def _remove_empty_rows_in_tables(doc: Document) -> None:
@@ -233,8 +235,7 @@ def _remove_empty_rows_in_tables(doc: Document) -> None:
         if _is_safety_keep_table(table):
             continue
         for row in list(table.rows)[1:]:
-            row_text = " | ".join(_cell_effective_text(c) for c in row.cells)
-            if not row_text.strip():
+            if all(not _cell_effective_text(c) for c in row.cells):
                 try:
                     table._tbl.remove(row._tr)
                 except Exception:
