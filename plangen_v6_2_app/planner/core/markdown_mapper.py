@@ -23,9 +23,13 @@ def _strip(s: Any) -> str:
     return s.strip(" |\t")
 
 
+def _trim_tail_punct(s: Any) -> str:
+    return _strip(s).rstrip("。；;，,、：: ")
+
+
 def _ok(s: Any) -> bool:
     t = _strip(s)
-    return bool(t) and t not in PLACEHOLDERS and not re.fullmatch(r"[-| ]+", t)
+    return bool(t) and t not in PLACEHOLDERS and not re.fullmatch(r"[-| ]+", t) and "{{" not in t and "}}" not in t
 
 
 def _first(patterns: List[str], text: str, default: str = "") -> str:
@@ -126,7 +130,6 @@ def _remove_leading_label(text: str, labels: List[str]) -> str:
 
 
 def _split_items(text: Any, labels: List[str] | None = None) -> List[str]:
-    """Split AI generated merged bullets into atomic rows for Word table cells."""
     t = _clean(text)
     if labels:
         t = _remove_leading_label(t, labels)
@@ -136,12 +139,9 @@ def _split_items(text: Any, labels: List[str] | None = None) -> List[str]:
         line = line.strip()
         if not line:
             continue
-        # Markdown bullets and numbered bullets are row separators. Preserve inner punctuation such as mg, D-1.
-        parts = re.split(r"(?<![A-Za-z0-9])(?:[•·▪■]|\d+[\.、）)]|[（(]?[一二三四五六七八九十]+[）)])\s*", line)
-        if len(parts) > 1:
-            raw_lines.extend(parts)
-        else:
-            raw_lines.append(line)
+        # 避免把 1.0 kg、D-1、1:1:1:1 等方案数值误拆成单独行。
+        parts = re.split(r"(?<![A-Za-z0-9.])(?:[•·▪■]|\d+[、）)]|[（(]?[一二三四五六七八九十]+[）)])\s*", line)
+        raw_lines.extend(parts if len(parts) > 1 else [line])
     out: List[str] = []
     for item in raw_lines:
         item = _strip(item)
@@ -236,21 +236,26 @@ def _endpoints(md: str) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
 
 
 def _summary(md: str) -> str:
-    sec = _section(md, ["摘要总结", "摘要"], ["五、", "## 五", "一、项目简介"])
-    return "\n".join([_strip(x) for x in sec.splitlines() if _ok(x)])
+    stop_heads = ["一、项目名称", "二、申办方", "三、质控类型", "四、摘要", "一、项目简介", "1.1", "1.2", "## 一", "# 一"]
+    sec = _section(md, ["摘要总结", "摘要"], stop_heads)
+    lines = []
+    for x in sec.splitlines():
+        t = _strip(x)
+        if not _ok(t):
+            continue
+        if re.match(r"^[一二三四五六七八九十]+[、.]", t):
+            break
+        if re.match(r"^\d+(\.\d+)*\s*", t) and any(k in t for k in ["项目名称", "质控类型", "申办方"]):
+            break
+        lines.append(t)
+    return "\n".join(lines)
 
 
 def _law_rows_from_line(line: str) -> Dict[str, str] | None:
     parts = [_strip(x) for x in re.split(r"\s*[｜|]\s*", line) if _ok(x)]
     if len(parts) < 3:
         return None
-    return {
-        "regulation": parts[0],
-        "article": parts[1] if len(parts) > 1 else "",
-        "original_text": parts[2] if len(parts) > 2 else "",
-        "topic": parts[3] if len(parts) > 3 else "",
-        "applicability": parts[4] if len(parts) > 4 else "",
-    }
+    return {"regulation": parts[0], "article": parts[1], "original_text": parts[2], "topic": parts[3] if len(parts) > 3 else "", "applicability": parts[4] if len(parts) > 4 else ""}
 
 
 def _law_rows(md: str) -> List[Dict[str, str]]:
@@ -259,13 +264,7 @@ def _law_rows(md: str) -> List[Dict[str, str]]:
     for r in table:
         if not r or not _ok(r[0]):
             continue
-        rows.append({
-            "regulation": _strip(r[0]),
-            "article": _strip(r[1]) if len(r) > 1 else "",
-            "original_text": _strip(r[2]) if len(r) > 2 else "",
-            "topic": _strip(r[3]) if len(r) > 3 else "",
-            "applicability": _strip(r[4]) if len(r) > 4 else "",
-        })
+        rows.append({"regulation": _strip(r[0]), "article": _strip(r[1]) if len(r) > 1 else "", "original_text": _strip(r[2]) if len(r) > 2 else "", "topic": _strip(r[3]) if len(r) > 3 else "", "applicability": _strip(r[4]) if len(r) > 4 else ""})
     if rows:
         return rows
     sec = _section(md, ["法规依据补充说明"], ["三、", "3.1", "质控流程"])
@@ -279,7 +278,7 @@ def _law_rows(md: str) -> List[Dict[str, str]]:
 def _law(md: str) -> str:
     rows = _law_rows(md)
     if rows:
-        return "\n".join("｜".join([x for x in [r.get("regulation", ""), r.get("article", ""), r.get("original_text", ""), r.get("topic", ""), r.get("applicability", "")] if _ok(x)]) for r in rows)
+        return ""
     return "本项目质控应结合现行GCP、临床试验方案、研究者手册、伦理批准文件及相关指导原则进行综合判断，确保受试者权益、安全保护及数据真实、准确、完整、可溯源。"
 
 
@@ -295,15 +294,15 @@ def parse_markdown_to_template_data(md_text: str) -> Dict[str, Any]:
     version_no, version_date = _version(_label(md, ["版本号/版本日期", "版本号", "版本日期"]))
     criteria, exclusions, process = _criteria(md)
     primary, secondary = _endpoints(md)
-    title = _title(md)
-    sponsor = _label(md, ["申办方公司名称", "申办方名称", "申办方", "申办者"])
-    audit_type = _first([r"质控类型[:：]\s*([^\n]+)", r"1\.2\s*质控类型[:：]?\s*\n([^#\n]+)"], md, "中心常规质控")
+    title = _trim_tail_punct(_title(md))
+    sponsor = _trim_tail_punct(_label(md, ["申办方公司名称", "申办方名称", "申办方", "申办者"]))
+    audit_type = _trim_tail_punct(_first([r"质控类型[:：]\s*([^\n]+)", r"1\.2\s*质控类型[:：]?\s*\n([^#\n]+)"], md, "中心常规质控"))
     sampling = _sampling(md)
     law_rows = _law_rows(md)
     return {
         "AUTHOR": author.strip(),
         "APPROVER": approver.strip(),
-        "AUDIT_COMPANY": _label(md, ["质控公司", "稽查公司"]) or "北京万宁睿和医药科技有限公司",
+        "AUDIT_COMPANY": _trim_tail_punct(_label(md, ["质控公司", "稽查公司"]) or "北京万宁睿和医药科技有限公司"),
         "PROJECT_TITLE": title,
         "PROJECT_CODE": _first([r"方案编号[:：]\s*([A-Za-z0-9\-]+)"], md),
         "SPONSOR_NAME": sponsor,
