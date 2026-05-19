@@ -236,19 +236,34 @@ def _endpoints(md: str) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
 
 
 def _summary(md: str) -> str:
-    stop_heads = ["一、项目名称", "二、申办方", "三、质控类型", "四、摘要", "一、项目简介", "1.1", "1.2", "## 一", "# 一"]
-    sec = _section(md, ["摘要总结", "摘要"], stop_heads)
-    lines = []
-    for x in sec.splitlines():
-        t = _strip(x)
-        if not _ok(t):
+    # 优先提取模型输出中的“摘要总结/四、摘要/摘要”正文；不能因为模板标题“摘要总结”而误停。
+    lines = md.splitlines()
+    start = None
+    for i, raw in enumerate(lines):
+        t = _strip(raw)
+        if re.fullmatch(r"(?:四[、.]\s*)?摘要(?:总结)?[:：]?", t):
+            start = i + 1
+            break
+    if start is None:
+        return ""
+
+    out: List[str] = []
+    for raw in lines[start:]:
+        t = _strip(raw)
+        if not t:
             continue
-        if re.match(r"^[一二三四五六七八九十]+[、.]", t):
+        # 兼容“摘要总结”后又出现“四、摘要”的结构，跳过二级摘要标题继续取正文。
+        if re.fullmatch(r"(?:四[、.]\s*)?摘要[:：]?", t):
+            continue
+        if re.match(r"^[一二三五六七八九十]+[、.]\s*", t):
             break
-        if re.match(r"^\d+(\.\d+)*\s*", t) and any(k in t for k in ["项目名称", "质控类型", "申办方"]):
+        if re.match(r"^\d+(\.\d+)*\s*", t):
             break
-        lines.append(t)
-    return "\n".join(lines)
+        if any(t.startswith(prefix) for prefix in ["项目名称", "申办方", "申办者", "质控类型"]):
+            break
+        if _ok(t):
+            out.append(t)
+    return "\n".join(out)
 
 
 def _law_rows_from_line(line: str) -> Dict[str, str] | None:
