@@ -5,6 +5,7 @@ import streamlit as st
 from planner.core.markdown_mapper import parse_markdown_to_template_data
 from planner.core.adaptive_template_engine import adaptive_map_template
 from planner.core.renderer import enrich_template_context
+from planner.core.summary_postprocess import extract_summary_fallback, ensure_summary_written
 
 APP_DIR = Path(__file__).parent
 OUTPUT_DIR = APP_DIR / "output"
@@ -35,8 +36,9 @@ if source_text.strip():
     if st.button("生成并下载中心质控计划", type="primary"):
         try:
             data = parse_markdown_to_template_data(source_text)
-            # 保留原始 Markdown，供模板引擎在结构化字段漏解析时进行兜底表格映射。
             data["RAW_MARKDOWN"] = source_text
+            if not str(data.get("SUMMARY_TEXT") or "").strip():
+                data["SUMMARY_TEXT"] = extract_summary_fallback(source_text)
             data = enrich_template_context(data)
 
             if project_name_override.strip():
@@ -44,15 +46,13 @@ if source_text.strip():
                 data.setdefault("project", {})["name"] = project_name_override.strip()
 
             project_name = data.get("PROJECT_TITLE") or data.get("project", {}).get("name") or "中心质控计划"
-
             safe_name = re.sub(r"[\\/:*?\"<>|\r\n]+", "_", project_name).strip()[:60]
-
             output_path = OUTPUT_DIR / f"{safe_name} 中心质控计划.docx"
 
             adaptive_map_template(TEMPLATE_PATH, data, output_path)
+            ensure_summary_written(output_path, data.get("SUMMARY_TEXT", ""))
 
             st.success("中心质控计划生成成功，请点击下方按钮下载。")
-
             st.download_button(
                 "下载中心质控计划 Word",
                 data=output_path.read_bytes(),
